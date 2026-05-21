@@ -512,6 +512,8 @@ impl XlsxParser {
 
         // Trim trailing columns where every row has empty cells.
         // Find the rightmost column index that has content in any row.
+        // Uses physical cell indices (one slot per Cell, regardless of col_span),
+        // matching how push_cell_with_row_local_spacing builds the cells vec.
         let max_content_col = table
             .rows
             .iter()
@@ -527,9 +529,7 @@ impl XlsxParser {
         if let Some(max_col) = max_content_col {
             let keep = max_col + 1;
             for row in &mut table.rows {
-                if row.cells.len() > keep {
-                    row.cells.truncate(keep);
-                }
+                row.cells.truncate(keep);
             }
         }
 
