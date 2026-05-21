@@ -1293,7 +1293,11 @@ mod tests {
             .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
             .unwrap();
 
-        assert_eq!(table.rows.len(), 1, "trailing empty-cell rows must be trimmed");
+        assert_eq!(
+            table.rows.len(),
+            1,
+            "trailing empty-cell rows must be trimmed"
+        );
         assert_eq!(table.rows[0].cells[0].plain_text(), "data");
     }
 
@@ -1388,7 +1392,8 @@ mod tests {
         // Note: push_cell_with_row_local_spacing adds gap cell for C before D,
         // so before trim each row has [A, B, gap-C, D, E] = 5 cells.
         assert_eq!(
-            table.rows[0].cells.len(), 2,
+            table.rows[0].cells.len(),
+            2,
             "trailing empty columns (C gap, D, E) must be trimmed; got {} cells",
             table.rows[0].cells.len()
         );
@@ -1421,7 +1426,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            table.rows.len(), 3,
+            table.rows.len(),
+            3,
             "middle empty row must be preserved, only trailing empty rows are trimmed"
         );
         assert_eq!(table.rows[0].cells[0].plain_text(), "first");

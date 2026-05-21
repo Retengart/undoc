@@ -364,7 +364,10 @@ mod tests {
         row.add_cell(Cell::new()); // empty cell, no text
         row.add_cell(Cell::new());
         // Row has cells but all are content-empty — should be considered empty
-        assert!(row.is_empty(), "row with only empty cells should be is_empty()");
+        assert!(
+            row.is_empty(),
+            "row with only empty cells should be is_empty()"
+        );
     }
 
     #[test]
