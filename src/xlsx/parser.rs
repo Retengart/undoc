@@ -510,6 +510,29 @@ impl XlsxParser {
             table.rows.pop();
         }
 
+        // Trim trailing columns where every row has empty cells.
+        // Find the rightmost column index that has content in any row.
+        let max_content_col = table
+            .rows
+            .iter()
+            .flat_map(|r| {
+                r.cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| !c.is_empty())
+                    .map(|(i, _)| i)
+            })
+            .max();
+
+        if let Some(max_col) = max_content_col {
+            let keep = max_col + 1;
+            for row in &mut table.rows {
+                if row.cells.len() > keep {
+                    row.cells.truncate(keep);
+                }
+            }
+        }
+
         Ok(table)
     }
 
@@ -1303,6 +1326,9 @@ mod tests {
 
     #[test]
     fn test_parse_sheet_preserves_explicit_empty_cell_position() {
+        // An explicit empty cell in a MIDDLE position (not trailing) must be preserved.
+        // Trailing empty columns are trimmed by the post-parse column-trim pass, but
+        // interior gaps between content cells must remain to keep column alignment.
         let parser = test_parser();
         let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -1310,6 +1336,7 @@ mod tests {
                     <row r="1">
                         <c r="A1" t="inlineStr"><is><t>value</t></is></c>
                         <c r="C1"/>
+                        <c r="E1" t="inlineStr"><is><t>end</t></is></c>
                     </row>
                 </sheetData>
             </worksheet>"#;
@@ -1319,10 +1346,86 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.rows.len(), 1);
-        assert_eq!(table.rows[0].cells.len(), 3);
+        // E1 (index 4) is the rightmost content cell → keep = 5
+        // Interior gaps B1 and C1/D1 are preserved.
+        assert_eq!(table.rows[0].cells.len(), 5);
         assert_eq!(table.rows[0].cells[0].plain_text(), "value");
         assert_eq!(table.rows[0].cells[1].plain_text(), "");
         assert_eq!(table.rows[0].cells[2].plain_text(), "");
+        assert_eq!(table.rows[0].cells[3].plain_text(), "");
+        assert_eq!(table.rows[0].cells[4].plain_text(), "end");
+    }
+
+    #[test]
+    fn test_parse_sheet_trims_trailing_empty_columns() {
+        // Columns C, D (gap), E contain only empty cells — they should be trimmed.
+        // Data is only in columns A and B.
+        let parser = test_parser();
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                <sheetData>
+                    <row r="1">
+                        <c r="A1" t="inlineStr"><is><t>H1</t></is></c>
+                        <c r="B1" t="inlineStr"><is><t>H2</t></is></c>
+                        <c r="D1"/>
+                        <c r="E1"/>
+                    </row>
+                    <row r="2">
+                        <c r="A2" t="inlineStr"><is><t>val</t></is></c>
+                        <c r="B2" t="inlineStr"><is><t>42</t></is></c>
+                        <c r="D2"/>
+                        <c r="E2"/>
+                    </row>
+                </sheetData>
+            </worksheet>"#;
+
+        let table = parser
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .unwrap();
+
+        assert_eq!(table.rows.len(), 2);
+        // Rightmost non-empty column is B (index 1), so each row should have 2 cells.
+        // Note: push_cell_with_row_local_spacing adds gap cell for C before D,
+        // so before trim each row has [A, B, gap-C, D, E] = 5 cells.
+        assert_eq!(
+            table.rows[0].cells.len(), 2,
+            "trailing empty columns (C gap, D, E) must be trimmed; got {} cells",
+            table.rows[0].cells.len()
+        );
+        assert_eq!(table.rows[0].cells[0].plain_text(), "H1");
+        assert_eq!(table.rows[0].cells[1].plain_text(), "H2");
+        assert_eq!(table.rows[1].cells.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_sheet_preserves_middle_empty_row() {
+        // Empty rows between data rows must NOT be trimmed — only trailing ones.
+        let parser = test_parser();
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                <sheetData>
+                    <row r="1">
+                        <c r="A1" t="inlineStr"><is><t>first</t></is></c>
+                    </row>
+                    <row r="2">
+                        <c r="A2"/>
+                    </row>
+                    <row r="3">
+                        <c r="A3" t="inlineStr"><is><t>third</t></is></c>
+                    </row>
+                </sheetData>
+            </worksheet>"#;
+
+        let table = parser
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .unwrap();
+
+        assert_eq!(
+            table.rows.len(), 3,
+            "middle empty row must be preserved, only trailing empty rows are trimmed"
+        );
+        assert_eq!(table.rows[0].cells[0].plain_text(), "first");
+        assert_eq!(table.rows[2].cells[0].plain_text(), "third");
     }
 
     #[test]
