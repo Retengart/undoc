@@ -177,9 +177,9 @@ impl Row {
         self.cells.len()
     }
 
-    /// Check if the row is empty.
+    /// Check if the row is empty — true when there are no cells or all cells are content-empty.
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
+        self.cells.is_empty() || self.cells.iter().all(|c| c.is_empty())
     }
 
     /// Get the effective column count (accounting for spans).
@@ -356,5 +356,27 @@ mod tests {
         let text = table.plain_text();
         assert!(text.contains("A1"));
         assert!(text.contains("B1"));
+    }
+
+    #[test]
+    fn test_row_is_empty_with_content_empty_cells() {
+        let mut row = Row::new();
+        row.add_cell(Cell::new()); // empty cell, no text
+        row.add_cell(Cell::new());
+        // Row has cells but all are content-empty — should be considered empty
+        assert!(row.is_empty(), "row with only empty cells should be is_empty()");
+    }
+
+    #[test]
+    fn test_row_is_empty_false_when_cell_has_content() {
+        let mut row = Row::new();
+        row.add_cell(Cell::with_text("hello"));
+        assert!(!row.is_empty());
+    }
+
+    #[test]
+    fn test_row_is_empty_true_with_no_cells() {
+        let row = Row::new();
+        assert!(row.is_empty());
     }
 }
