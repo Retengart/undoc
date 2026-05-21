@@ -503,9 +503,10 @@ impl XlsxParser {
             buf.clear();
         }
 
-        // Trim only truly absent trailing rows. Explicitly addressed XLSX cells may render
-        // empty but still carry structural meaning, so keep any row that materialized cells.
-        while table.rows.last().is_some_and(|r| r.cells.is_empty()) {
+        // Trim trailing rows where every cell is content-empty (no text, no value).
+        // These arise from formatting-only rows, deleted-but-kept rows, and conditional
+        // formatting applied to entire columns — all common causes of massive row inflation.
+        while table.rows.last().is_some_and(|r| r.is_empty()) {
             table.rows.pop();
         }
 
@@ -1223,7 +1224,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sheet_preserves_formula_only_trailing_row() {
+    fn test_parse_sheet_trims_formula_only_trailing_row() {
+        // The parser does not retain formula presence on the cell model: a formula-only
+        // cell with no computed <v> is content-empty. Under issue #6's fix it is therefore
+        // trimmed together with any other trailing content-empty row.
         let parser = test_parser();
         let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -1238,9 +1242,36 @@ mod tests {
             .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
             .unwrap();
 
-        assert_eq!(table.rows.len(), 1);
-        assert_eq!(table.rows[0].cells.len(), 1);
-        assert_eq!(table.rows[0].cells[0].plain_text(), "");
+        assert_eq!(table.rows.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_sheet_trims_trailing_rows_with_explicit_empty_cells() {
+        // Reproduces issue #6: rows with explicit empty cell references (e.g. from
+        // conditional formatting) must be trimmed from the trailing end.
+        let parser = test_parser();
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                <sheetData>
+                    <row r="1">
+                        <c r="A1" t="inlineStr"><is><t>data</t></is></c>
+                    </row>
+                    <row r="2">
+                        <c r="A2"/>
+                        <c r="B2"/>
+                    </row>
+                    <row r="3">
+                        <c r="A3"/>
+                    </row>
+                </sheetData>
+            </worksheet>"#;
+
+        let table = parser
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .unwrap();
+
+        assert_eq!(table.rows.len(), 1, "trailing empty-cell rows must be trimmed");
+        assert_eq!(table.rows[0].cells[0].plain_text(), "data");
     }
 
     #[test]
