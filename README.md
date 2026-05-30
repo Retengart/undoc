@@ -20,10 +20,12 @@ A high-performance Rust library for extracting content from Microsoft Office doc
 - **CJK text support**: Smart spacing for Korean, Chinese, Japanese content
 - **Asset extraction**: Images, charts, and embedded media with resolved paths (XLSX drawings included)
 - **Rich content**: Footnotes/endnotes, headers/footers, text boxes, cell comments, hyperlinks
+- **Section markers**: `<!-- slide N: Name -->` / `<!-- sheet N: Name -->` boundary markers for PPTX/XLSX
 - **Text cleanup**: Multiple presets for LLM training data preparation
 - **Self-update**: Built-in update mechanism via GitHub releases
 - **C-ABI FFI**: Native library for C#, Python, and other languages
 - **Parallel processing**: Uses Rayon for multi-section documents
+- **Streaming pipeline** (0.3.0+): `parse_file_streaming` yields sections as they parse; peak memory bounded regardless of document size
 
 ---
 
@@ -48,8 +50,9 @@ Download the latest release from [GitHub Releases](https://github.com/iyulab/und
 #### Windows (x64)
 
 ```powershell
-# Download and extract
-Invoke-WebRequest -Uri "https://github.com/iyulab/undoc/releases/latest/download/undoc-cli-x86_64-pc-windows-msvc.zip" -OutFile "undoc.zip"
+# Download and extract (replace VERSION with the actual version, e.g. v0.3.1)
+$VERSION = (Invoke-RestMethod "https://api.github.com/repos/iyulab/undoc/releases/latest").tag_name
+Invoke-WebRequest -Uri "https://github.com/iyulab/undoc/releases/latest/download/undoc-windows-x86_64-${VERSION}.zip" -OutFile "undoc.zip"
 Expand-Archive -Path "undoc.zip" -DestinationPath "."
 
 # Move to a directory in PATH (optional)
@@ -62,9 +65,10 @@ undoc version
 #### Linux (x64)
 
 ```bash
-# Download and extract
-curl -LO https://github.com/iyulab/undoc/releases/latest/download/undoc-cli-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf undoc-cli-x86_64-unknown-linux-gnu.tar.gz
+# Download and extract (replace VERSION with the actual version, e.g. v0.3.1)
+VERSION=$(curl -s "https://api.github.com/repos/iyulab/undoc/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+curl -LO "https://github.com/iyulab/undoc/releases/latest/download/undoc-linux-x86_64-${VERSION}.tar.gz"
+tar -xzf "undoc-linux-x86_64-${VERSION}.tar.gz"
 
 # Install to /usr/local/bin (requires sudo)
 sudo mv undoc /usr/local/bin/
@@ -82,13 +86,14 @@ undoc version
 #### macOS
 
 ```bash
-# Intel Mac
-curl -LO https://github.com/iyulab/undoc/releases/latest/download/undoc-cli-x86_64-apple-darwin.tar.gz
-tar -xzf undoc-cli-x86_64-apple-darwin.tar.gz
+# Intel Mac (replace VERSION with the actual version, e.g. v0.3.1)
+VERSION=$(curl -s "https://api.github.com/repos/iyulab/undoc/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+curl -LO "https://github.com/iyulab/undoc/releases/latest/download/undoc-macos-x86_64-${VERSION}.tar.gz"
+tar -xzf "undoc-macos-x86_64-${VERSION}.tar.gz"
 
-# Apple Silicon (M1/M2/M3)
-curl -LO https://github.com/iyulab/undoc/releases/latest/download/undoc-cli-aarch64-apple-darwin.tar.gz
-tar -xzf undoc-cli-aarch64-apple-darwin.tar.gz
+# Apple Silicon (M1/M2/M3/M4)
+curl -LO "https://github.com/iyulab/undoc/releases/latest/download/undoc-macos-aarch64-${VERSION}.tar.gz"
+tar -xzf "undoc-macos-aarch64-${VERSION}.tar.gz"
 
 # Install
 sudo mv undoc /usr/local/bin/
@@ -101,10 +106,10 @@ undoc version
 
 | Platform | Architecture | File |
 |----------|--------------|------|
-| Windows | x64 | `undoc-cli-x86_64-pc-windows-msvc.zip` |
-| Linux | x64 | `undoc-cli-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS | Intel | `undoc-cli-x86_64-apple-darwin.tar.gz` |
-| macOS | Apple Silicon | `undoc-cli-aarch64-apple-darwin.tar.gz` |
+| Windows | x64 | `undoc-windows-x86_64-{version}.zip` |
+| Linux | x64 | `undoc-linux-x86_64-{version}.tar.gz` |
+| macOS | Intel | `undoc-macos-x86_64-{version}.tar.gz` |
+| macOS | Apple Silicon | `undoc-macos-aarch64-{version}.tar.gz` |
 
 ### Updating
 
@@ -140,7 +145,7 @@ cargo add undoc
 ### Quick Start
 
 ```bash
-# Extract all formats (Markdown, text, JSON) + media to output directory
+# Convert to Markdown + extract media (default)
 undoc document.docx
 
 # Specify output directory
@@ -154,18 +159,26 @@ undoc document.docx --cleanup aggressive
 
 ```
 document_output/
-├── extract.md      # Markdown output with frontmatter
-├── extract.txt     # Plain text output
-├── content.json    # Full structured JSON
+├── extract.md      # Markdown output
 └── media/          # Extracted images and media
     └── image1.jpeg
+```
+
+Use `undoc convert <file> --all` to produce all three formats at once:
+
+```
+document_output/
+├── extract.md      # Markdown output
+├── extract.txt     # Plain text output
+├── content.json    # Full structured JSON
+└── media/
 ```
 
 ### Commands
 
 ```bash
-undoc <file> [output]              # Extract all formats (default)
-undoc convert <file> [OPTIONS]     # Same as above, explicit command
+undoc <file> [output]              # Convert to Markdown + extract media (default)
+undoc convert <file> [OPTIONS]     # Convert with full format/streaming control
 undoc markdown <file> [OPTIONS]    # Convert to Markdown only (alias: md)
 undoc text <file> [OPTIONS]        # Convert to plain text only
 undoc json <file> [OPTIONS]        # Convert to JSON only
@@ -174,6 +187,43 @@ undoc extract <file> [OPTIONS]     # Extract resources only
 undoc update [OPTIONS]             # Self-update to latest version
 undoc version                      # Show version information
 ```
+
+### Convert (multi-format streaming pipeline)
+
+```bash
+# Markdown only (default)
+undoc convert document.docx
+
+# All formats + media
+undoc convert document.docx --all -o ./output
+
+# Specific formats
+undoc convert document.docx --formats md,txt,json
+
+# Skip media extraction
+undoc convert document.docx --no-images
+
+# Lossless mode (page breaks + headers/footers)
+undoc convert document.docx --lossless
+
+# Insert section boundary markers for PPTX/XLSX
+undoc convert presentation.pptx --section-markers
+```
+
+#### Convert Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-o, --output` | Output directory | `<stem>_output/` |
+| `--formats` | Comma-separated formats: `md,txt,json` | `md` |
+| `--all` | Output all formats (MD + TXT + JSON) | false |
+| `--no-images` | Skip media extraction | false |
+| `--cleanup` | Text cleanup: `minimal`, `standard`, `aggressive` | none |
+| `--section-markers` | Insert `<!-- slide/sheet N: Name -->` markers (PPTX/XLSX) | false |
+| `--emit-page-breaks` | Emit `---` for hard page breaks | false |
+| `--include-headers-footers` | Include section headers/footers as blockquotes | false |
+| `--lossless` | Enable both `--emit-page-breaks` and `--include-headers-footers` | false |
+| `-q, --quiet` | Suppress progress output | false |
 
 ### Convert to Markdown
 
@@ -195,6 +245,12 @@ undoc markdown spreadsheet.xlsx --table-mode html -o output.md
 
 # Limit heading depth
 undoc markdown document.docx --max-heading 3 -o output.md
+
+# Insert section boundary markers for PPTX/XLSX
+undoc markdown presentation.pptx --section-markers -o slides.md
+
+# Lossless mode (preserve page breaks and headers/footers)
+undoc markdown document.docx --lossless -o output.md
 ```
 
 #### Markdown Options
@@ -205,7 +261,11 @@ undoc markdown document.docx --max-heading 3 -o output.md
 | `-f, --frontmatter` | Include YAML frontmatter | false |
 | `--table-mode` | Table rendering: `markdown`, `html`, `ascii` | markdown |
 | `--cleanup` | Text cleanup: `minimal`, `standard`, `aggressive` | none |
-| `--max-heading` | Maximum heading level (1-6) | 6 |
+| `--max-heading` | Maximum heading level (1-6) | 4 |
+| `--section-markers` | Insert `<!-- slide/sheet N: Name -->` markers (PPTX/XLSX) | false |
+| `--emit-page-breaks` | Emit `---` for hard page breaks | false |
+| `--include-headers-footers` | Include section headers/footers as blockquotes | false |
+| `--lossless` | Enable both `--emit-page-breaks` and `--include-headers-footers` | false |
 
 ### Convert to Plain Text
 
@@ -285,8 +345,8 @@ undoc md report.docx --frontmatter -o report.md
 # Convert Excel to Markdown tables
 undoc md data.xlsx -o tables.md
 
-# Convert PowerPoint to Markdown
-undoc md presentation.pptx -o slides.md
+# Convert PowerPoint to Markdown with slide markers
+undoc md presentation.pptx --section-markers -o slides.md
 
 # Extract all images from a document
 undoc extract report.docx -o ./images
@@ -332,18 +392,36 @@ fn main() -> undoc::Result<()> {
 }
 ```
 
+### Convenience Functions
+
+```rust
+// One-shot conversions without building a Document first
+let text     = undoc::extract_text("document.docx")?;
+let markdown = undoc::to_markdown("document.docx")?;
+let json     = undoc::to_json("document.docx", undoc::render::JsonFormat::Pretty)?;
+
+// Parse from bytes
+let doc = undoc::parse_bytes(&file_bytes)?;
+```
+
 ### Render Options
 
 ```rust
 use undoc::render::{RenderOptions, CleanupPreset, TableFallback};
+use undoc::SectionMarkerStyle;
 
 let options = RenderOptions::new()
     .with_frontmatter(true)
     .with_table_fallback(TableFallback::Html)
     .with_cleanup_preset(CleanupPreset::Aggressive)
-    .with_max_heading(3);
+    .with_max_heading(3)
+    .with_section_markers(SectionMarkerStyle::Comment); // <!-- slide N: Name -->
 
 let markdown = render::to_markdown(&doc, &options)?;
+
+// Lossless mode: preserve page breaks and headers/footers
+let lossless = RenderOptions::lossless();
+let markdown = render::to_markdown(&doc, &lossless)?;
 ```
 
 ### Working with Document Structure
@@ -371,6 +449,32 @@ for (id, resource) in &doc.resources {
     let filename = resource.suggested_filename(id);
     std::fs::write(&filename, &resource.data)?;
 }
+```
+
+### Streaming Pipeline
+
+Supported for PPTX (per slide) and XLSX (per sheet). DOCX is not yet supported.
+
+```rust
+use std::ops::ControlFlow;
+use undoc::{parse_file_streaming, ParseEvent, SectionStreamOptions};
+
+parse_file_streaming("slides.pptx", SectionStreamOptions::default(), |event| {
+    match event {
+        ParseEvent::DocumentStart { metadata, section_count, .. } => {
+            println!("{} sections", section_count);
+        }
+        ParseEvent::SectionParsed(section) => {
+            // section memory is freed after this callback returns
+            println!("Slide: {:?}", section.name);
+        }
+        ParseEvent::ResourceExtracted { name, data } => {
+            std::fs::write(&name, &data).ok();
+        }
+        _ => {}
+    }
+    ControlFlow::Continue(())
+})?;
 ```
 
 ### Format Detection
@@ -452,7 +556,7 @@ Structured Markdown with preserved formatting:
 - **Hyperlinks**: Preserved as Markdown links (DOCX, XLSX, PPTX)
 - **Images**: Linked image references from document drawings
 - **Footnotes**: Markdown reference-style (`[^N]` / `[^N]: text`)
-- **Headers/Footers**: Rendered as blockquotes
+- **Headers/Footers**: Rendered as blockquotes (opt-in via `--include-headers-footers`)
 
 ### Plain Text
 
@@ -496,7 +600,7 @@ Complete document structure with metadata:
 ```toml
 # Cargo.toml - enable FFI
 [dependencies]
-undoc = { version = "0.1", features = ["ffi"] }
+undoc = { version = "0.3", features = ["ffi"] }
 ```
 
 ---
@@ -506,6 +610,7 @@ undoc = { version = "0.1", features = ["ffi"] }
 - Parallel section/sheet/slide processing with Rayon
 - Efficient XML parsing with quick-xml
 - Memory-efficient handling of large documents
+- Streaming pipeline for bounded peak memory on large files
 
 ---
 
@@ -520,3 +625,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Related Projects
 
 - [unhwp](https://github.com/iyulab/unhwp) - Korean HWP document extraction
+- [unpdf](https://github.com/iyulab/unpdf) - PDF document extraction
