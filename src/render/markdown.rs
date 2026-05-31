@@ -399,6 +399,9 @@ fn render_frontmatter(doc: &Document) -> String {
     let mut fm = String::from("---\n");
     let meta = &doc.metadata;
 
+    // Document format (docx / xlsx / pptx)
+    fm.push_str(&format!("format: {}\n", doc.format.extension()));
+
     // Core metadata
     if let Some(ref title) = meta.title {
         fm.push_str(&format!("title: \"{}\"\n", escape_yaml(title)));
@@ -514,6 +517,13 @@ fn render_paragraph(
         } else {
             None
         }
+    };
+
+    // List items are never headings — suppress heading if list_info is set
+    let effective_heading = if merged_para.list_info.is_some() {
+        None
+    } else {
+        effective_heading
     };
 
     // Apply heading formatting if determined
@@ -2037,5 +2047,115 @@ mod tests {
 
         assert!(!md.contains("Header:"), "No header should be rendered");
         assert!(!md.contains("Footer:"), "No footer should be rendered");
+    }
+
+    #[test]
+    fn test_html_table_vmerge_rowspan() {
+        // BUG-2: vMerge origin cells must carry correct rowspan in HTML fallback
+        let mut table = Table::new();
+
+        // Row 0: [A(rowspan=2), B]
+        table.add_row(Row {
+            cells: vec![
+                Cell {
+                    content: vec![Paragraph::with_text("A")],
+                    nested_tables: vec![],
+                    col_span: 1,
+                    row_span: 2,
+                    alignment: CellAlignment::Left,
+                    vertical_alignment: crate::model::VerticalAlignment::Top,
+                    is_header: false,
+                    background: None,
+                },
+                Cell {
+                    content: vec![Paragraph::with_text("B")],
+                    nested_tables: vec![],
+                    col_span: 1,
+                    row_span: 1,
+                    alignment: CellAlignment::Left,
+                    vertical_alignment: crate::model::VerticalAlignment::Top,
+                    is_header: false,
+                    background: None,
+                },
+            ],
+            is_header: false,
+            height: None,
+        });
+        // Row 1: [C] (A's continuation is absent from cells, C is at col 1)
+        table.add_row(Row {
+            cells: vec![Cell {
+                content: vec![Paragraph::with_text("C")],
+                nested_tables: vec![],
+                col_span: 1,
+                row_span: 1,
+                alignment: CellAlignment::Left,
+                vertical_alignment: crate::model::VerticalAlignment::Top,
+                is_header: false,
+                background: None,
+            }],
+            is_header: false,
+            height: None,
+        });
+
+        let options =
+            RenderOptions::new().with_table_fallback(crate::render::TableFallback::Html);
+        let html = render_table(&table, &options, &empty_resource_map());
+
+        assert!(
+            html.contains("rowspan=\"2\""),
+            "Expected rowspan=2 on origin cell, got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_list_item_with_heading_style_renders_as_list_not_heading() {
+        // BUG-1: paragraph with both list_info and heading style must not produce "# -"
+        use crate::model::{ListInfo, ListType};
+
+        let mut para = Paragraph::new();
+        para.runs.push(TextRun::plain("Item text"));
+        para.heading = HeadingLevel::from_number(1);
+        para.list_info = Some(ListInfo {
+            level: 0,
+            number: None,
+            list_type: ListType::Bullet,
+        });
+
+        let mut doc = Document::new();
+        let mut section = Section::new(0);
+        section.add_paragraph(para);
+        doc.add_section(section);
+
+        let options = RenderOptions::default();
+        let md = to_markdown(&doc, &options).unwrap();
+
+        assert!(
+            !md.contains("# "),
+            "Heading marker must not appear for list item, got: {md}"
+        );
+        assert!(
+            md.contains("- Item text"),
+            "List marker must appear, got: {md}"
+        );
+    }
+
+    #[test]
+    fn test_frontmatter_format_field() {
+        // FEAT-3: frontmatter must include format field
+        use crate::detect::FormatType;
+
+        let mut doc = Document::new();
+        doc.format = FormatType::Docx;
+        let mut section = Section::new(0);
+        section.add_paragraph(Paragraph::with_text("Content"));
+        doc.add_section(section);
+
+        let options = RenderOptions::new().with_frontmatter(true);
+        let md = to_markdown(&doc, &options).unwrap();
+
+        assert!(
+            md.contains("format: docx"),
+            "Expected 'format: docx' in frontmatter, got: {md}"
+        );
     }
 }

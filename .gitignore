@@ -26,6 +26,7 @@ claudedocs/
 test-files/
 test-results/
 .serena/
+test_output.log
 
 # Python bindings
 bindings/python/src/undoc/lib/

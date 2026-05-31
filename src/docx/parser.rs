@@ -140,6 +140,83 @@ impl DocxParser {
         Ok(doc)
     }
 
+    /// Stream document sections one at a time via a callback.
+    ///
+    /// DOCX has a single logical document but may contain multiple sections via
+    /// page-section breaks.  The entire document is parsed upfront and each
+    /// section is delivered as a [`SectionParsed`](crate::streaming::ParseEvent) event.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn for_each_section<F>(
+        &mut self,
+        opts: crate::streaming::SectionStreamOptions,
+        mut f: F,
+    ) -> crate::error::Result<()>
+    where
+        F: FnMut(crate::streaming::ParseEvent<'_>) -> std::ops::ControlFlow<()>,
+    {
+        let metadata = self.parse_metadata()?;
+
+        // Parse the complete document first so we can report section_count and
+        // build the image_map before emitting DocumentStart.
+        let doc = match self.parse() {
+            Ok(d) => d,
+            Err(e) if opts.lenient => {
+                // Emit a degenerate stream with a single failure
+                let _ = f(crate::streaming::ParseEvent::DocumentStart {
+                    metadata: &metadata,
+                    section_count: 0,
+                    image_map: HashMap::new(),
+                });
+                let _ = f(crate::streaming::ParseEvent::SectionFailed { index: 0, error: e });
+                let _ = f(crate::streaming::ParseEvent::DocumentEnd);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+
+        let image_map: HashMap<String, String> = doc
+            .resources
+            .iter()
+            .filter_map(|(id, r)| r.filename.as_ref().map(|name| (id.clone(), name.clone())))
+            .collect();
+
+        if f(crate::streaming::ParseEvent::DocumentStart {
+            metadata: &metadata,
+            section_count: doc.sections.len(),
+            image_map,
+        })
+        .is_break()
+        {
+            return Ok(());
+        }
+
+        for section in &doc.sections {
+            if f(crate::streaming::ParseEvent::SectionParsed(section)).is_break() {
+                return Ok(());
+            }
+        }
+
+        if f(crate::streaming::ParseEvent::DocumentEnd).is_break() {
+            return Ok(());
+        }
+
+        if opts.extract_resources {
+            for (id, resource) in doc.resources {
+                let name = resource.filename.clone().unwrap_or(id);
+                if f(crate::streaming::ParseEvent::ResourceExtracted {
+                    name,
+                    data: resource.data,
+                })
+                .is_break()
+                {
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Parse document metadata from docProps/core.xml.
     fn parse_metadata(&self) -> Result<Metadata> {
         // Use shared metadata parsing from container
@@ -1067,6 +1144,11 @@ impl DocxParser {
         let mut cell_alignment = CellAlignment::Left;
         let mut in_tc_pr = false; // Track w:tcPr (table cell properties)
 
+        // vMerge rowspan tracking: col_cursor tracks logical column position within current row;
+        // vmerge_origins maps logical_col -> (row_idx, cell_idx) of the origin cell.
+        let mut col_cursor = 0usize;
+        let mut vmerge_origins: HashMap<usize, (usize, usize)> = HashMap::new();
+
         // Track nested table depth (0 = we're at the main table level)
         // 1+ = we're inside a nested table and should collect its XML
         let mut nested_table_depth: u32 = 0;
@@ -1299,6 +1381,7 @@ impl DocxParser {
                                 table.add_row(row);
                             }
                             in_row = false;
+                            col_cursor = 0;
                         }
                         b"w:tcPr" => {
                             in_tc_pr = false;
@@ -1324,10 +1407,32 @@ impl DocxParser {
                                     is_header: is_header_row,
                                     background: None,
                                 };
+                                // Track as vMerge origin: row_idx = table.rows.len() (index
+                                // the current row will have once pushed in </w:tr> handler)
+                                if let Some(ref row) = current_row {
+                                    vmerge_origins.insert(
+                                        col_cursor,
+                                        (table.rows.len(), row.cells.len()),
+                                    );
+                                }
                                 if let Some(ref mut row) = current_row {
                                     row.cells.push(cell);
                                 }
+                            } else {
+                                // Continuation cell: find origin and increment its row_span
+                                if let Some(&(origin_row_idx, origin_cell_idx)) =
+                                    vmerge_origins.get(&col_cursor)
+                                {
+                                    if let Some(row) = table.rows.get_mut(origin_row_idx) {
+                                        if let Some(cell) = row.cells.get_mut(origin_cell_idx) {
+                                            cell.row_span += 1;
+                                        }
+                                    }
+                                }
+                                cell_paragraphs.clear();
+                                cell_nested_tables.clear();
                             }
+                            col_cursor += col_span as usize;
                             in_cell = false;
                         }
                         b"w:p" if in_cell => {
@@ -2872,6 +2977,110 @@ mod tests {
         assert!(
             !text.contains("A &amp; B"),
             "legitimate entity must not remain escaped; got {text:?}"
+        );
+    }
+
+    #[test]
+    fn test_vmerge_origin_gets_correct_rowspan() {
+        // BUG-2: parse_table must set row_span=2 on the origin cell of a vMerge pair.
+        // The parser fix uses col_cursor + vmerge_origins to track this at parse time.
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc>
+          <w:tcPr><w:vMerge w:val="restart"/></w:tcPr>
+          <w:p><w:r><w:t>A</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:p><w:r><w:t>B</w:t></w:r></w:p>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc>
+          <w:tcPr><w:vMerge/></w:tcPr>
+          <w:p/>
+        </w:tc>
+        <w:tc>
+          <w:p><w:r><w:t>C</w:t></w:r></w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>"#;
+
+        let data = create_minimal_docx(doc_xml);
+        let mut parser = DocxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let table = match doc.sections[0].content.first() {
+            Some(Block::Table(t)) => t,
+            other => panic!("expected Block::Table, got {other:?}"),
+        };
+
+        assert_eq!(table.rows.len(), 2, "table should have 2 rows");
+        // Row 0: origin cell A (row_span=2) + cell B
+        assert_eq!(
+            table.rows[0].cells[0].row_span, 2,
+            "origin cell must have row_span=2"
+        );
+        // Row 1: only cell C (continuation cell excluded)
+        assert_eq!(
+            table.rows[1].cells.len(), 1,
+            "continuation cell must be excluded from row 1"
+        );
+        assert_eq!(table.rows[1].cells[0].plain_text(), "C");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_docx_streaming_emits_expected_events() {
+        // FEAT-2: parse_file_streaming must work for DOCX.
+        use crate::streaming::{ParseEvent, SectionStreamOptions};
+        use std::ops::ControlFlow;
+
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r><w:t>Stream me</w:t></w:r></w:p></w:body>
+</w:document>"#;
+
+        let data = create_minimal_docx(doc_xml);
+        let mut parser = DocxParser::from_bytes(data).unwrap();
+
+        let mut event_log: Vec<&'static str> = Vec::new();
+        let mut section_text = String::new();
+
+        parser
+            .for_each_section(SectionStreamOptions::default(), |event| {
+                match event {
+                    ParseEvent::DocumentStart { .. } => event_log.push("start"),
+                    ParseEvent::SectionParsed(s) => {
+                        event_log.push("section");
+                        section_text = s
+                            .content
+                            .iter()
+                            .filter_map(|b| {
+                                if let Block::Paragraph(p) = b {
+                                    Some(p.plain_text())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                    }
+                    ParseEvent::DocumentEnd => event_log.push("end"),
+                    _ => {}
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+
+        assert_eq!(event_log, ["start", "section", "end"]);
+        assert!(
+            section_text.contains("Stream me"),
+            "section text missing, got: {section_text}"
         );
     }
 }

@@ -225,10 +225,14 @@ impl PptxParser {
                 format!("ppt/{}", target)
             };
 
-            let slide_rels = self.parse_slide_relationships(&slide_path)?;
+            let slide_full_rels =
+                self.container.read_optional_relationships_for_part(&slide_path)?;
+            let inherited_phs = self.build_inherited_phs(&slide_path, &slide_full_rels);
+            let slide_rels = slide_full_rels.into_targets_by_id();
 
             if let Some(xml) = self.container.read_xml_optional(&slide_path)? {
-                let blocks = self.parse_slide_content_with_rels(&xml, &slide_rels, &slide_path)?;
+                let blocks =
+                    self.parse_slide_content_with_rels(&xml, &slide_rels, &slide_path, &inherited_phs)?;
                 for block in blocks {
                     section.add_block(block);
                 }
@@ -274,7 +278,7 @@ impl PptxParser {
     /// Parse slide XML into content blocks (paragraphs and tables).
     #[allow(dead_code)]
     fn parse_slide_content(&self, xml: &str) -> Result<Vec<Block>> {
-        self.parse_slide_content_with_rels(xml, &HashMap::new(), "")
+        self.parse_slide_content_with_rels(xml, &HashMap::new(), "", &HashMap::new())
     }
 
     /// Parse slide XML into content blocks with relationship map for hyperlinks, images, and charts.
@@ -283,11 +287,13 @@ impl PptxParser {
         xml: &str,
         rels: &HashMap<String, String>,
         slide_path: &str,
+        inherited_phs: &HashMap<String, Vec<Paragraph>>,
     ) -> Result<Vec<Block>> {
         let mut blocks = Vec::new();
 
         // Parse text content first (title, headings usually come before tables)
-        let paragraphs = self.parse_text_content_excluding_tables_with_rels(xml, rels)?;
+        let paragraphs =
+            self.parse_text_content_excluding_tables_with_rels(xml, rels, inherited_phs)?;
         for para in paragraphs {
             blocks.push(Block::Paragraph(para));
         }
@@ -783,14 +789,16 @@ impl PptxParser {
     /// Parse text content excluding tables (paragraphs from shapes, not table cells).
     #[allow(dead_code)]
     fn parse_text_content_excluding_tables(&self, xml: &str) -> Result<Vec<Paragraph>> {
-        self.parse_text_content_excluding_tables_with_rels(xml, &HashMap::new())
+        self.parse_text_content_excluding_tables_with_rels(xml, &HashMap::new(), &HashMap::new())
     }
 
     /// Parse text content excluding tables with relationship map for hyperlinks.
+    /// `inherited_phs` maps placeholder key → fallback paragraphs from layout/master.
     fn parse_text_content_excluding_tables_with_rels(
         &self,
         xml: &str,
         rels: &HashMap<String, String>,
+        inherited_phs: &HashMap<String, Vec<Paragraph>>,
     ) -> Result<Vec<Paragraph>> {
         let mut paragraphs = Vec::new();
         let mut reader = quick_xml::Reader::from_str(xml);
@@ -811,6 +819,9 @@ impl PptxParser {
         let mut current_style = TextStyle::default();
         let mut current_hyperlink: Option<String> = None;
         let mut current_heading: HeadingLevel = HeadingLevel::None;
+        // Placeholder inheritance tracking
+        let mut current_ph_key: Option<String> = None;
+        let mut shape_para_start: usize = 0; // paragraphs.len() when current shape started
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -828,6 +839,8 @@ impl PptxParser {
                         b"sp" if !in_table => {
                             in_shape = true;
                             current_heading = HeadingLevel::None;
+                            current_ph_key = None;
+                            shape_para_start = paragraphs.len();
                         }
                         // p:txBody - text body in shape
                         b"txBody" if in_shape && !in_table => {
@@ -886,19 +899,32 @@ impl PptxParser {
                                 }
                             }
                         }
-                        // p:ph - placeholder type (for heading detection)
+                        // p:ph - placeholder type (for heading detection and inheritance key)
                         b"ph" if in_shape && !in_table => {
+                            let mut ph_type = String::new();
+                            let mut ph_idx: Option<String> = None;
                             for attr in e.attributes().flatten() {
-                                if attr.key.local_name().as_ref() == b"type" {
-                                    let ph_type = String::from_utf8_lossy(&attr.value);
-                                    current_heading = match ph_type.as_ref() {
-                                        "title" | "ctrTitle" => HeadingLevel::H1,
-                                        "subTitle" => HeadingLevel::H2,
-                                        "body" => HeadingLevel::None,
-                                        _ => HeadingLevel::None,
-                                    };
+                                match attr.key.local_name().as_ref() {
+                                    b"type" => {
+                                        ph_type = String::from_utf8_lossy(&attr.value).into_owned();
+                                        current_heading = match ph_type.as_str() {
+                                            "title" | "ctrTitle" => HeadingLevel::H1,
+                                            "subTitle" => HeadingLevel::H2,
+                                            _ => HeadingLevel::None,
+                                        };
+                                    }
+                                    b"idx" => {
+                                        ph_idx =
+                                            Some(String::from_utf8_lossy(&attr.value).into_owned());
+                                    }
+                                    _ => {}
                                 }
                             }
+                            current_ph_key = Some(if !ph_type.is_empty() {
+                                ph_type
+                            } else {
+                                format!("idx:{}", ph_idx.as_deref().unwrap_or("0"))
+                            });
                         }
                         _ => {}
                     }
@@ -908,17 +934,32 @@ impl PptxParser {
                     match local_name.as_ref() {
                         // p:ph - placeholder type (self-closing)
                         b"ph" if in_shape && !in_table => {
+                            let mut ph_type = String::new();
+                            let mut ph_idx: Option<String> = None;
                             for attr in e.attributes().flatten() {
-                                if attr.key.local_name().as_ref() == b"type" {
-                                    let ph_type = String::from_utf8_lossy(&attr.value);
-                                    current_heading = match ph_type.as_ref() {
-                                        "title" | "ctrTitle" => HeadingLevel::H1,
-                                        "subTitle" => HeadingLevel::H2,
-                                        "body" => HeadingLevel::None,
-                                        _ => HeadingLevel::None,
-                                    };
+                                match attr.key.local_name().as_ref() {
+                                    b"type" => {
+                                        ph_type =
+                                            String::from_utf8_lossy(&attr.value).into_owned();
+                                        current_heading = match ph_type.as_str() {
+                                            "title" | "ctrTitle" => HeadingLevel::H1,
+                                            "subTitle" => HeadingLevel::H2,
+                                            _ => HeadingLevel::None,
+                                        };
+                                    }
+                                    b"idx" => {
+                                        ph_idx = Some(
+                                            String::from_utf8_lossy(&attr.value).into_owned(),
+                                        );
+                                    }
+                                    _ => {}
                                 }
                             }
+                            current_ph_key = Some(if !ph_type.is_empty() {
+                                ph_type
+                            } else {
+                                format!("idx:{}", ph_idx.as_deref().unwrap_or("0"))
+                            });
                         }
                         b"rPr" if in_run && !in_table => {
                             for attr in e.attributes().flatten() {
@@ -1004,8 +1045,18 @@ impl PptxParser {
                             in_txbody = false;
                         }
                         b"sp" if !in_table => {
+                            // If this shape had a placeholder but produced no text,
+                            // inherit from layout/master
+                            if paragraphs.len() == shape_para_start {
+                                if let Some(ref ph_key) = current_ph_key {
+                                    if let Some(fallback) = inherited_phs.get(ph_key) {
+                                        paragraphs.extend_from_slice(fallback);
+                                    }
+                                }
+                            }
                             in_shape = false;
                             current_heading = HeadingLevel::None;
+                            current_ph_key = None;
                         }
                         _ => {}
                     }
@@ -1201,6 +1252,58 @@ impl PptxParser {
         Ok(paragraphs)
     }
 
+    /// Build a map of placeholder key → fallback paragraphs from layout and master XMLs.
+    /// Layout takes precedence over master; slide-defined text takes precedence over both.
+    fn build_inherited_phs(
+        &self,
+        slide_path: &str,
+        slide_full_rels: &crate::container::Relationships,
+    ) -> HashMap<String, Vec<Paragraph>> {
+        const SLIDE_LAYOUT_TYPE: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
+        const SLIDE_MASTER_TYPE: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
+
+        let mut inherited: HashMap<String, Vec<Paragraph>> = HashMap::new();
+
+        // Try to find the layout from slide relationships
+        let layout_path = slide_full_rels
+            .get_by_type(SLIDE_LAYOUT_TYPE)
+            .first()
+            .map(|rel| OoxmlContainer::resolve_path(slide_path, &rel.target));
+
+        let Some(layout_path) = layout_path else {
+            return inherited;
+        };
+
+        // Parse master first (lower priority), then overlay layout
+        let layout_full_rels = self
+            .container
+            .read_optional_relationships_for_part(&layout_path)
+            .unwrap_or_default();
+
+        if let Some(master_rel) = layout_full_rels.get_by_type(SLIDE_MASTER_TYPE).first() {
+            let master_path = OoxmlContainer::resolve_path(&layout_path, &master_rel.target);
+            if let Ok(Some(master_xml)) = self.container.read_xml_optional(&master_path) {
+                inherited = parse_placeholder_texts_from_xml(&master_xml);
+            }
+        }
+
+        if let Ok(Some(layout_xml)) = self.container.read_xml_optional(&layout_path) {
+            // Layout overrides master
+            for (key, paras) in parse_placeholder_texts_from_xml(&layout_xml) {
+                inherited.insert(key, paras);
+            }
+        }
+
+        // Remove presentational placeholders — these are dynamic at display time
+        // and would inject noise (footer text, slide numbers, dates) into every slide.
+        const PRESENTATIONAL: &[&str] = &["dt", "sldNum", "ftr", "hdr", "sldImg"];
+        inherited.retain(|k, _| !PRESENTATIONAL.contains(&k.as_str()));
+
+        inherited
+    }
+
     /// Extract resources (images, media) from the presentation.
     pub fn extract_resources(&self) -> Result<Vec<Resource>> {
         let mut resources = Vec::new();
@@ -1242,6 +1345,180 @@ impl PptxParser {
     pub fn slide_count(&self) -> usize {
         self.slides.len()
     }
+}
+
+/// Parse placeholder texts from a layout or master XML.
+/// Returns ph_key → Vec<Paragraph> for non-empty placeholder shapes.
+/// ph_key = ph type (e.g. "title") if set, else "idx:<N>".
+fn parse_placeholder_texts_from_xml(xml: &str) -> HashMap<String, Vec<Paragraph>> {
+    let mut result: HashMap<String, Vec<Paragraph>> = HashMap::new();
+
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+
+    let mut in_shape = false;
+    let mut in_table = false;
+    let mut table_depth = 0u32;
+    let mut in_txbody = false;
+    let mut in_paragraph = false;
+    let mut in_run = false;
+    let mut in_text = false;
+    let mut current_ph_key: Option<String> = None;
+    let mut current_runs: Vec<TextRun> = Vec::new();
+    let mut current_text = String::new();
+    let mut current_heading = HeadingLevel::None;
+    let mut shape_paragraphs: Vec<Paragraph> = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e)) => {
+                let local = e.name().local_name();
+                match local.as_ref() {
+                    b"tbl" => {
+                        in_table = true;
+                        table_depth += 1;
+                    }
+                    b"sp" if !in_table => {
+                        in_shape = true;
+                        current_ph_key = None;
+                        current_heading = HeadingLevel::None;
+                        shape_paragraphs.clear();
+                    }
+                    b"txBody" if in_shape && !in_table => {
+                        in_txbody = true;
+                    }
+                    b"p" if in_txbody && !in_table => {
+                        in_paragraph = true;
+                        current_runs.clear();
+                    }
+                    b"r" if in_paragraph && !in_table => {
+                        in_run = true;
+                        current_text.clear();
+                    }
+                    b"t" if in_run && !in_table => {
+                        in_text = true;
+                    }
+                    b"ph" if in_shape && !in_table => {
+                        let mut ph_type = String::new();
+                        let mut ph_idx: Option<String> = None;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.local_name().as_ref() {
+                                b"type" => {
+                                    ph_type =
+                                        String::from_utf8_lossy(&attr.value).into_owned();
+                                    current_heading = match ph_type.as_str() {
+                                        "title" | "ctrTitle" => HeadingLevel::H1,
+                                        "subTitle" => HeadingLevel::H2,
+                                        _ => HeadingLevel::None,
+                                    };
+                                }
+                                b"idx" => {
+                                    ph_idx =
+                                        Some(String::from_utf8_lossy(&attr.value).into_owned());
+                                }
+                                _ => {}
+                            }
+                        }
+                        current_ph_key = Some(if !ph_type.is_empty() {
+                            ph_type
+                        } else {
+                            format!("idx:{}", ph_idx.as_deref().unwrap_or("0"))
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                let local = e.name().local_name();
+                if local.as_ref() == b"ph" && in_shape && !in_table {
+                    let mut ph_type = String::new();
+                    let mut ph_idx: Option<String> = None;
+                    for attr in e.attributes().flatten() {
+                        match attr.key.local_name().as_ref() {
+                            b"type" => {
+                                ph_type = String::from_utf8_lossy(&attr.value).into_owned();
+                                current_heading = match ph_type.as_str() {
+                                    "title" | "ctrTitle" => HeadingLevel::H1,
+                                    "subTitle" => HeadingLevel::H2,
+                                    _ => HeadingLevel::None,
+                                };
+                            }
+                            b"idx" => {
+                                ph_idx =
+                                    Some(String::from_utf8_lossy(&attr.value).into_owned());
+                            }
+                            _ => {}
+                        }
+                    }
+                    current_ph_key = Some(if !ph_type.is_empty() {
+                        ph_type
+                    } else {
+                        format!("idx:{}", ph_idx.as_deref().unwrap_or("0"))
+                    });
+                }
+            }
+            Ok(quick_xml::events::Event::Text(ref e)) if in_text && !in_table => {
+                current_text.push_str(&crate::decode::decode_text_lossy(e));
+            }
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                let local = e.name().local_name();
+                match local.as_ref() {
+                    b"tbl" => {
+                        table_depth -= 1;
+                        if table_depth == 0 {
+                            in_table = false;
+                        }
+                    }
+                    b"t" if !in_table => {
+                        in_text = false;
+                    }
+                    b"r" if !in_table => {
+                        if !current_text.is_empty() {
+                            current_runs.push(TextRun {
+                                text: current_text.clone(),
+                                style: TextStyle::default(),
+                                hyperlink: None,
+                                line_break: false,
+                                page_break: false,
+                                revision: RevisionType::None,
+                            });
+                        }
+                        in_run = false;
+                    }
+                    b"p" if !in_table => {
+                        if !current_runs.is_empty() {
+                            shape_paragraphs.push(Paragraph {
+                                runs: current_runs.clone(),
+                                heading: current_heading,
+                                ..Default::default()
+                            });
+                        }
+                        in_paragraph = false;
+                    }
+                    b"txBody" if !in_table => {
+                        in_txbody = false;
+                    }
+                    b"sp" if !in_table => {
+                        // Only store non-empty shapes with a placeholder key
+                        if let Some(ph_key) = current_ph_key.take() {
+                            if !shape_paragraphs.is_empty() {
+                                result.insert(ph_key, shape_paragraphs.clone());
+                            }
+                        }
+                        in_shape = false;
+                        current_heading = HeadingLevel::None;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    result
 }
 
 /// Guess MIME type from file extension.

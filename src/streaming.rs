@@ -10,7 +10,7 @@
 //!
 //! - **PPTX**: each slide is a separate event.
 //! - **XLSX**: each sheet is a separate event.
-//! - **DOCX**: not yet supported (returns [`Error::UnsupportedFormat`]).
+//! - **DOCX**: the entire document is parsed and its sections are yielded as events.
 //!
 //! ## Event order
 //!
@@ -173,9 +173,10 @@ where
             parser.for_each_section(opts, f)
         }
         #[cfg(feature = "docx")]
-        FormatType::Docx => Err(Error::UnsupportedFormat(
-            "streaming not yet supported for DOCX — use parse_file() instead".into(),
-        )),
+        FormatType::Docx => {
+            let mut parser = crate::docx::DocxParser::open(path)?;
+            parser.for_each_section(opts, f)
+        }
         #[allow(unreachable_patterns)]
         _ => Err(Error::UnsupportedFormat(format!("{:?}", format))),
     }

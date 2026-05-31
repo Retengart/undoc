@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-01
+
+### Added
+- **FEAT-1** — PPTX slide layout / slide master text inheritance. Placeholder shapes that are empty in a slide now inherit text from the slideLayout XML, falling back to the slideMaster XML. This recovers titles and subtitles defined only at the layout or master level.
+- **FEAT-2** — DOCX streaming support via `parse_file_streaming`. The entire document is parsed and its sections are delivered as `SectionParsed` events, consistent with PPTX and XLSX streaming APIs. The previous `UnsupportedFormat` error is removed.
+
+## [0.4.1] - 2026-06-01
+
+### Fixed
+- **BUG-1** — DOCX paragraphs with both a heading style (`<w:pStyle>`) and list numbering (`<w:numPr>`) no longer render as `# - item`. List items always take precedence over heading formatting.
+- **BUG-2** — DOCX tables with vertically merged cells (`<w:vMerge>`) now correctly compute `rowspan` on the originating cell in the HTML table fallback. The `vMerge` origin is tracked at parse-time using a column-cursor + origin-map; continuation cells remain excluded from the cell list as before.
+
+### Added
+- **FEAT-3** — Markdown frontmatter now includes a `format: docx|xlsx|pptx` field, making the source document type explicit for LLM pipelines.
+
 ## [0.4.0] - 2026-05-31
 
 ### Added
