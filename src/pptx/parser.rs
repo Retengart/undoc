@@ -225,14 +225,19 @@ impl PptxParser {
                 format!("ppt/{}", target)
             };
 
-            let slide_full_rels =
-                self.container.read_optional_relationships_for_part(&slide_path)?;
+            let slide_full_rels = self
+                .container
+                .read_optional_relationships_for_part(&slide_path)?;
             let inherited_phs = self.build_inherited_phs(&slide_path, &slide_full_rels);
             let slide_rels = slide_full_rels.into_targets_by_id();
 
             if let Some(xml) = self.container.read_xml_optional(&slide_path)? {
-                let blocks =
-                    self.parse_slide_content_with_rels(&xml, &slide_rels, &slide_path, &inherited_phs)?;
+                let blocks = self.parse_slide_content_with_rels(
+                    &xml,
+                    &slide_rels,
+                    &slide_path,
+                    &inherited_phs,
+                )?;
                 for block in blocks {
                     section.add_block(block);
                 }
@@ -939,8 +944,7 @@ impl PptxParser {
                             for attr in e.attributes().flatten() {
                                 match attr.key.local_name().as_ref() {
                                     b"type" => {
-                                        ph_type =
-                                            String::from_utf8_lossy(&attr.value).into_owned();
+                                        ph_type = String::from_utf8_lossy(&attr.value).into_owned();
                                         current_heading = match ph_type.as_str() {
                                             "title" | "ctrTitle" => HeadingLevel::H1,
                                             "subTitle" => HeadingLevel::H2,
@@ -948,9 +952,8 @@ impl PptxParser {
                                         };
                                     }
                                     b"idx" => {
-                                        ph_idx = Some(
-                                            String::from_utf8_lossy(&attr.value).into_owned(),
-                                        );
+                                        ph_idx =
+                                            Some(String::from_utf8_lossy(&attr.value).into_owned());
                                     }
                                     _ => {}
                                 }
@@ -1405,8 +1408,7 @@ fn parse_placeholder_texts_from_xml(xml: &str) -> HashMap<String, Vec<Paragraph>
                         for attr in e.attributes().flatten() {
                             match attr.key.local_name().as_ref() {
                                 b"type" => {
-                                    ph_type =
-                                        String::from_utf8_lossy(&attr.value).into_owned();
+                                    ph_type = String::from_utf8_lossy(&attr.value).into_owned();
                                     current_heading = match ph_type.as_str() {
                                         "title" | "ctrTitle" => HeadingLevel::H1,
                                         "subTitle" => HeadingLevel::H2,
@@ -1445,8 +1447,7 @@ fn parse_placeholder_texts_from_xml(xml: &str) -> HashMap<String, Vec<Paragraph>
                                 };
                             }
                             b"idx" => {
-                                ph_idx =
-                                    Some(String::from_utf8_lossy(&attr.value).into_owned());
+                                ph_idx = Some(String::from_utf8_lossy(&attr.value).into_owned());
                             }
                             _ => {}
                         }

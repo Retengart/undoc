@@ -1410,10 +1410,8 @@ impl DocxParser {
                                 // Track as vMerge origin: row_idx = table.rows.len() (index
                                 // the current row will have once pushed in </w:tr> handler)
                                 if let Some(ref row) = current_row {
-                                    vmerge_origins.insert(
-                                        col_cursor,
-                                        (table.rows.len(), row.cells.len()),
-                                    );
+                                    vmerge_origins
+                                        .insert(col_cursor, (table.rows.len(), row.cells.len()));
                                 }
                                 if let Some(ref mut row) = current_row {
                                     row.cells.push(cell);
@@ -3027,7 +3025,8 @@ mod tests {
         );
         // Row 1: only cell C (continuation cell excluded)
         assert_eq!(
-            table.rows[1].cells.len(), 1,
+            table.rows[1].cells.len(),
+            1,
             "continuation cell must be excluded from row 1"
         );
         assert_eq!(table.rows[1].cells[0].plain_text(), "C");

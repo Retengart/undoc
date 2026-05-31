@@ -2097,8 +2097,7 @@ mod tests {
             height: None,
         });
 
-        let options =
-            RenderOptions::new().with_table_fallback(crate::render::TableFallback::Html);
+        let options = RenderOptions::new().with_table_fallback(crate::render::TableFallback::Html);
         let html = render_table(&table, &options, &empty_resource_map());
 
         assert!(
