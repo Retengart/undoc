@@ -8,6 +8,7 @@ use crate::model::{
     Row, Section, Table, TextRun, TextStyle,
 };
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 /// Slide info from presentation.xml.
@@ -27,6 +28,7 @@ pub struct PptxParser {
 
 impl PptxParser {
     /// Open a PPTX file for parsing.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let container = OoxmlContainer::open(path)?;
         Self::from_container(container)

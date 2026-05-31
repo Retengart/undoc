@@ -75,15 +75,20 @@ pub mod ffi;
 
 // Re-exports
 pub use container::{OoxmlContainer, Relationship, Relationships};
-pub use detect::{detect_format_from_bytes, detect_format_from_path, FormatType};
+pub use detect::detect_format_from_bytes;
+#[cfg(not(target_arch = "wasm32"))]
+pub use detect::detect_format_from_path;
+pub use detect::FormatType;
 pub use error::{Error, Result};
 pub use model::{
     Block, Cell, CellAlignment, Document, HeadingLevel, ListInfo, ListType, Metadata, Paragraph,
     Resource, ResourceType, Row, Section, Table, TextAlignment, TextRun, TextStyle,
 };
 pub use render::SectionMarkerStyle;
+#[cfg(not(target_arch = "wasm32"))]
 pub use streaming::{parse_file_streaming, ParseEvent, SectionStreamOptions};
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 /// Parse a document file and return a Document model.
@@ -99,6 +104,7 @@ use std::path::Path;
 /// println!("Sections: {}", doc.sections.len());
 /// # Ok::<(), undoc::Error>(())
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_file(path: impl AsRef<Path>) -> Result<Document> {
     let path = path.as_ref();
     let format = detect_format_from_path(path)?;
@@ -170,6 +176,7 @@ pub fn parse_bytes(data: &[u8]) -> Result<Document> {
 /// println!("{}", text);
 /// # Ok::<(), undoc::Error>(())
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn extract_text(path: impl AsRef<Path>) -> Result<String> {
     let doc = parse_file(path)?;
     Ok(doc.plain_text())
@@ -186,6 +193,7 @@ pub fn extract_text(path: impl AsRef<Path>) -> Result<String> {
 /// std::fs::write("output.md", markdown)?;
 /// # Ok::<(), undoc::Error>(())
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn to_markdown(path: impl AsRef<Path>) -> Result<String> {
     let doc = parse_file(path)?;
     render::to_markdown(&doc, &render::RenderOptions::default())
@@ -205,6 +213,7 @@ pub fn to_markdown(path: impl AsRef<Path>) -> Result<String> {
 /// let markdown = to_markdown_with_options("document.docx", &options)?;
 /// # Ok::<(), undoc::Error>(())
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn to_markdown_with_options(
     path: impl AsRef<Path>,
     options: &render::RenderOptions,
@@ -223,6 +232,7 @@ pub fn to_markdown_with_options(
 /// let text = to_text("document.docx", &RenderOptions::default())?;
 /// # Ok::<(), undoc::Error>(())
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn to_text(path: impl AsRef<Path>, options: &render::RenderOptions) -> Result<String> {
     let doc = parse_file(path)?;
     render::to_text(&doc, options)
@@ -239,6 +249,7 @@ pub fn to_text(path: impl AsRef<Path>, options: &render::RenderOptions) -> Resul
 /// std::fs::write("output.json", json)?;
 /// # Ok::<(), undoc::Error>(())
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn to_json(path: impl AsRef<Path>, format: render::JsonFormat) -> Result<String> {
     let doc = parse_file(path)?;
     render::to_json(&doc, format)

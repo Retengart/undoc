@@ -3,8 +3,12 @@
 use crate::container::decode_xml_bytes;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::BufReader;
+use std::io::{Read, Seek};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 /// ZIP file magic bytes: PK\x03\x04
@@ -75,6 +79,7 @@ impl std::fmt::Display for FormatType {
 /// println!("Detected format: {}", format);
 /// # Ok::<(), undoc::Error>(())
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn detect_format_from_path(path: impl AsRef<Path>) -> Result<FormatType> {
     let file = File::open(path.as_ref())?;
     let reader = BufReader::new(file);

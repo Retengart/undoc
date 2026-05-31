@@ -1,10 +1,10 @@
 [workspace]
-members = [".", "cli"]
+members = [".", "cli", "undoc-wasm"]
 resolver = "2"
 
 [package]
 name = "undoc"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 authors = ["iyulab"]
 description = "High-performance Microsoft Office document extraction to Markdown"
@@ -28,8 +28,9 @@ async = ["tokio"]
 ffi = []
 
 [dependencies]
-# ZIP handling
-zip = "2.2"
+# ZIP handling — default-features disabled: lzma/bzip2/xz/zstd require C toolchain
+# OOXML files exclusively use Deflate; dropping other compression codecs is safe.
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 # XML parsing
 quick-xml = { version = "0.37", features = ["serialize"] }

@@ -1,6 +1,11 @@
 //! Utility to explore PPTX structure for development
+#[cfg(not(target_arch = "wasm32"))]
 use undoc::container::OoxmlContainer;
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let path = std::env::args()
         .nth(1)

@@ -7,6 +7,7 @@ use crate::model::{
     Section, Table, TextRun,
 };
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use super::shared_strings::SharedStrings;
@@ -39,6 +40,7 @@ pub struct XlsxParser {
 
 impl XlsxParser {
     /// Open an XLSX file for parsing.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let container = OoxmlContainer::open(path)?;
         Self::from_container(container)

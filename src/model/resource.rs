@@ -192,6 +192,7 @@ impl Resource {
     }
 
     /// Save resource to a file.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         std::fs::write(path, &self.data)
     }
