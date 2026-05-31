@@ -26,8 +26,7 @@ impl OfficeDocument {
     #[wasm_bindgen(js_name = toText)]
     pub fn to_text(&self) -> Result<String, JsValue> {
         let opts = RenderOptions::default();
-        undoc::render::to_text(&self.inner, &opts)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        undoc::render::to_text(&self.inner, &opts).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = toJson)]
@@ -41,8 +40,7 @@ impl OfficeDocument {
     }
 
     pub fn metadata(&self) -> Result<String, JsValue> {
-        serde_json::to_string(&self.inner.metadata)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        serde_json::to_string(&self.inner.metadata).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 

@@ -6,9 +6,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
-use std::io::{Cursor, Read, Seek};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::BufReader;
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
