@@ -26,18 +26,38 @@ A high-performance Rust library for extracting content from Microsoft Office doc
 - **C-ABI FFI**: Native library for C#, Python, and other languages
 - **Parallel processing**: Uses Rayon for multi-section documents
 - **Streaming pipeline** (0.3.0+): `parse_file_streaming` yields sections as they parse; peak memory bounded regardless of document size
+- **WebAssembly** (0.4.0+): `@iyulab/undoc` npm package — parse Office documents in the browser, no server required
 
 ---
 
 ## Table of Contents
 
 - [Installation](#installation)
+- [WASM / Browser](#wasm--browser)
 - [CLI Usage](#cli-usage)
 - [Rust Library Usage](#rust-library-usage)
 - [C# / .NET Integration](#c--net-integration)
 - [Output Formats](#output-formats)
 - [Feature Flags](#feature-flags)
 - [License](#license)
+
+---
+
+## WASM / Browser
+
+Parse Office documents in the browser — no server, no upload:
+
+```js
+import init, { parse } from '@iyulab/undoc';
+await init();
+const doc = parse(new Uint8Array(await file.arrayBuffer()));
+console.log(doc.format());      // "docx" | "xlsx" | "pptx"
+console.log(doc.toMarkdown());
+```
+
+Install: `npm install @iyulab/undoc`
+
+**[Live Playground →](https://iyulab.github.io/undoc/)**
 
 ---
 

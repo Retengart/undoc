@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-31
+
+### Added
+- **WASM support**: `undoc-wasm` crate — parse DOCX/XLSX/PPTX in browser/Node.js via wasm-bindgen
+- **GitHub Pages playground**: drag-drop live demo at https://iyulab.github.io/undoc/
+- `@iyulab/undoc` npm package published on release via `wasm-pack`
+- `parse()` module-level function and `OfficeDocument` class with `fromBytes`, `toMarkdown`, `toText`, `toJson`, `format`, `metadata` methods
+
+### Changed
+- Filesystem-dependent APIs (`parse_file`, `extract_text`, `to_markdown`, `to_text`, `to_json`, `parse_file_streaming`, parser `open()` methods) now cfg-gated on `not(target_arch = "wasm32")` — no behavior change on native targets
+- `zip` dependency: disabled `lzma`/`bzip2`/`xz`/`zstd` compression features (OOXML uses Deflate only; removes C-compiler dependency for WASM builds)
+
 ## [0.3.0] - 2026-05-12
 
 ### Added
