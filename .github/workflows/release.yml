@@ -177,6 +177,49 @@ jobs:
         run: cargo publish -p undoc-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: true
 
+  publish-npm:
+    name: Publish npm (@iyulab/undoc)
+    needs: [check-version, create-release]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-wasm-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-release-
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM package
+        run: wasm-pack build undoc-wasm --target bundler --out-dir undoc-wasm/pkg
+
+      - name: Set scoped npm package name
+        run: |
+          jq '.name = "@iyulab/undoc"' undoc-wasm/pkg/package.json > /tmp/pkg.json
+          mv /tmp/pkg.json undoc-wasm/pkg/package.json
+
+      - name: Copy LICENSE into pkg
+        run: cp LICENSE undoc-wasm/pkg/
+
+      - name: Publish to npm
+        run: wasm-pack publish undoc-wasm/pkg --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   cleanup-old-releases:
     name: Cleanup Old Releases
     # Run after the new release is published. We only need create-release

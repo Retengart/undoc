@@ -23,11 +23,12 @@ jobs:
       - name: Verify all package versions match
         shell: bash
         run: |
-          # Extract version strings from the four canonical files listed in
+          # Extract version strings from the five canonical files listed in
           # CLAUDE.md's "Version Bump Checklist". CI fails fast when any are
           # out of sync — a full release can't ship mismatched versions.
           root=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           cli=$(grep -m1 '^version = ' cli/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          wasm=$(grep -m1 '^version = ' undoc-wasm/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           py=$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
           cs=$(grep -oE '<Version>[^<]+</Version>' bindings/csharp/Undoc/Undoc.csproj | head -1 | sed 's/<[^>]*>//g')
 
@@ -37,19 +38,20 @@ jobs:
 
           echo "Root Cargo.toml:                    $root"
           echo "cli/Cargo.toml:                     $cli"
+          echo "undoc-wasm/Cargo.toml:              $wasm"
           echo "bindings/python/pyproject.toml:     $py"
           echo "bindings/csharp/Undoc/Undoc.csproj: $cs"
           echo "cli -> undoc dep version:            $dep"
 
           fail=0
-          for v in "$cli" "$py" "$cs" "$dep"; do
+          for v in "$cli" "$wasm" "$py" "$cs" "$dep"; do
             if [ "$v" != "$root" ]; then
               fail=1
             fi
           done
 
           if [ $fail -eq 1 ]; then
-            echo "::error::Version mismatch — update all four canonical files AND cli's undoc dep together per CLAUDE.md Version Bump Checklist."
+            echo "::error::Version mismatch — update all five canonical files AND cli's undoc dep together per CLAUDE.md Version Bump Checklist."
             exit 1
           fi
           echo "All versions match: $root"
@@ -92,6 +94,38 @@ jobs:
 
       - name: Build with FFI
         run: cargo build --release --features ffi
+
+  build-wasm:
+    name: Build WASM
+    needs: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM (bundler target)
+        run: wasm-pack build undoc-wasm --target bundler
+
+      - name: Run wasm-pack tests (Node.js)
+        run: wasm-pack test --node undoc-wasm
 
   lint:
     name: Lint
