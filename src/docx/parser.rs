@@ -535,6 +535,7 @@ impl DocxParser {
         let mut in_text = false; // Track w:t elements (regular text)
         let mut in_instr_text = false; // Track w:instrText elements (field codes to skip)
         let mut in_drawing = false; // Track w:drawing elements for images
+        let mut in_pict = false; // Track w:pict/w:object elements for VML images
         let mut in_ins = false; // Track w:ins elements (tracked changes - insertions)
         let mut in_del = false; // Track w:del elements (tracked changes - deletions)
         let mut txbx_content_depth: u32 = 0; // Track w:txbxContent nesting (suppress text capture)
@@ -568,6 +569,7 @@ impl DocxParser {
                         in_drawing = true;
                         current_image_alt = None;
                     }
+                    b"w:pict" | b"w:object" => in_pict = true,
                     // Tracked changes - insertions
                     b"w:ins" => in_ins = true,
                     // Tracked changes - deletions
@@ -704,6 +706,12 @@ impl DocxParser {
                                 };
                                 para.images.push(image);
                             }
+                        }
+                    }
+                    // VML image handling: v:imagedata references the image part
+                    b"v:imagedata" if in_pict => {
+                        if let Some(image) = vml_inline_image(e) {
+                            para.images.push(image);
                         }
                     }
                     // Break handling - line break or page break
@@ -923,6 +931,7 @@ impl DocxParser {
                         in_drawing = false;
                         current_image_alt = None;
                     }
+                    b"w:pict" | b"w:object" => in_pict = false,
                     b"w:ins" => in_ins = false,
                     b"w:del" => in_del = false,
                     _ => {}
@@ -1132,6 +1141,8 @@ impl DocxParser {
         let mut in_text = false; // Track w:t elements (regular text)
         let mut in_instr_text = false; // Track w:instrText elements (field codes to skip)
         let mut in_drawing = false; // Track w:drawing elements for images
+        let mut in_pict = false; // Track w:pict/w:object elements for VML images
+        let mut mc_fallback_depth: u32 = 0; // Track mc:Fallback nesting (skip VML duplicates)
         let mut current_image_alt: Option<String> = None;
         let mut current_row: Option<Row> = None;
         let mut cell_paragraphs: Vec<Paragraph> = Vec::new();
@@ -1219,6 +1230,8 @@ impl DocxParser {
                             in_drawing = true;
                             current_image_alt = None;
                         }
+                        b"w:pict" | b"w:object" => in_pict = true,
+                        b"mc:Fallback" => mc_fallback_depth += 1,
                         _ => {}
                     }
                 }
@@ -1320,6 +1333,15 @@ impl DocxParser {
                                     if let Some(ref mut para) = current_paragraph {
                                         para.images.push(image);
                                     }
+                                }
+                            }
+                        }
+                        // VML image handling: skip mc:Fallback copies, which
+                        // duplicate the DrawingML mc:Choice branch
+                        b"v:imagedata" if in_pict && mc_fallback_depth == 0 => {
+                            if let Some(image) = vml_inline_image(e) {
+                                if let Some(ref mut para) = current_paragraph {
+                                    para.images.push(image);
                                 }
                             }
                         }
@@ -1462,6 +1484,8 @@ impl DocxParser {
                             in_drawing = false;
                             current_image_alt = None;
                         }
+                        b"w:pict" | b"w:object" => in_pict = false,
+                        b"mc:Fallback" => mc_fallback_depth = mc_fallback_depth.saturating_sub(1),
                         _ => {}
                     }
                 }
@@ -1644,6 +1668,31 @@ fn parse_header_footer_xml(xml: &str) -> Vec<Paragraph> {
     }
 
     paragraphs
+}
+
+/// Build an `InlineImage` from a VML `v:imagedata` element, if it carries an
+/// `r:id` relationship reference. `o:title` supplies the alt text.
+///
+/// VML appears standalone in legacy documents (typically .doc → .docx
+/// conversions) via `w:pict`, and as the visual representation of embedded
+/// OLE objects via `w:object`. VML inside `mc:Fallback` duplicates the
+/// DrawingML `mc:Choice` and is skipped by the callers' fallback guards.
+fn vml_inline_image(e: &quick_xml::events::BytesStart) -> Option<crate::model::InlineImage> {
+    let mut rel_id = None;
+    let mut title = None;
+    for attr in e.attributes().flatten() {
+        match attr.key.as_ref() {
+            b"r:id" => rel_id = Some(String::from_utf8_lossy(&attr.value).to_string()),
+            b"o:title" => title = Some(String::from_utf8_lossy(&attr.value).to_string()),
+            _ => {}
+        }
+    }
+    Some(crate::model::InlineImage {
+        resource_id: rel_id?,
+        alt_text: title,
+        width: None,
+        height: None,
+    })
 }
 
 /// Helper to get a boolean attribute value.
@@ -2740,6 +2789,215 @@ mod tests {
             "Text box content should appear exactly once, not duplicated. Full text: {}",
             text
         );
+    }
+
+    /// First paragraph's inline images, for VML extraction assertions.
+    fn first_paragraph_images(doc: &Document) -> &[crate::model::InlineImage] {
+        for block in &doc.sections[0].content {
+            if let Block::Paragraph(para) = block {
+                return &para.images;
+            }
+        }
+        panic!("no paragraph found in first section");
+    }
+
+    #[test]
+    fn test_vml_pict_image_extracted() {
+        // Legacy documents (typically .doc → .docx conversions) embed images
+        // as standalone VML: w:pict > v:shape > v:imagedata[@r:id].
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:o="urn:schemas-microsoft-com:office:office"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:pict>
+          <v:shape style="width:100pt;height:50pt">
+            <v:imagedata r:id="rId5" o:title="legacy image"/>
+          </v:shape>
+        </w:pict>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>"#;
+
+        let data = create_minimal_docx(doc_xml);
+        let mut parser = DocxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let images = first_paragraph_images(&doc);
+        assert_eq!(images.len(), 1, "VML image not extracted");
+        assert_eq!(images[0].resource_id, "rId5");
+        assert_eq!(images[0].alt_text.as_deref(), Some("legacy image"));
+    }
+
+    #[test]
+    fn test_vml_object_image_extracted() {
+        // Embedded OLE objects (w:object) carry their visual as v:imagedata.
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:object>
+          <v:shape><v:imagedata r:id="rId7"/></v:shape>
+        </w:object>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>"#;
+
+        let data = create_minimal_docx(doc_xml);
+        let mut parser = DocxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let images = first_paragraph_images(&doc);
+        assert_eq!(images.len(), 1, "w:object VML image not extracted");
+        assert_eq!(images[0].resource_id, "rId7");
+    }
+
+    #[test]
+    fn test_vml_fallback_image_not_duplicated() {
+        // mc:AlternateContent pairs a DrawingML Choice with a VML Fallback
+        // for the same picture — only the Choice branch must produce an image.
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:r>
+        <mc:AlternateContent>
+          <mc:Choice>
+            <w:drawing>
+              <a:blip r:embed="rId3"/>
+            </w:drawing>
+          </mc:Choice>
+          <mc:Fallback>
+            <w:pict>
+              <v:shape><v:imagedata r:id="rId3"/></v:shape>
+            </w:pict>
+          </mc:Fallback>
+        </mc:AlternateContent>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>"#;
+
+        let data = create_minimal_docx(doc_xml);
+        let mut parser = DocxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let images = first_paragraph_images(&doc);
+        assert_eq!(
+            images.len(),
+            1,
+            "fallback VML must not duplicate the Choice image"
+        );
+        assert_eq!(images[0].resource_id, "rId3");
+    }
+
+    #[test]
+    fn test_vml_pict_image_in_table_cell() {
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc>
+          <w:p>
+            <w:r>
+              <w:pict>
+                <v:shape><v:imagedata r:id="rId9"/></v:shape>
+              </w:pict>
+            </w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>"#;
+
+        let data = create_minimal_docx(doc_xml);
+        let mut parser = DocxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let table = doc.sections[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table missing");
+        let images = &table.rows[0].cells[0].content[0].images;
+        assert_eq!(images.len(), 1, "VML image in table cell not extracted");
+        assert_eq!(images[0].resource_id, "rId9");
+    }
+
+    #[test]
+    fn test_vml_fallback_image_not_duplicated_in_table_cell() {
+        // Same AlternateContent dedup contract as the body-paragraph path:
+        // the table-cell parser must not extract the Fallback VML copy.
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc>
+          <w:p>
+            <w:r>
+              <mc:AlternateContent>
+                <mc:Choice>
+                  <w:drawing>
+                    <a:blip r:embed="rId4"/>
+                  </w:drawing>
+                </mc:Choice>
+                <mc:Fallback>
+                  <w:pict>
+                    <v:shape><v:imagedata r:id="rId4"/></v:shape>
+                  </w:pict>
+                </mc:Fallback>
+              </mc:AlternateContent>
+            </w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>"#;
+
+        let data = create_minimal_docx(doc_xml);
+        let mut parser = DocxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let table = doc.sections[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table missing");
+        let images = &table.rows[0].cells[0].content[0].images;
+        assert_eq!(
+            images.len(),
+            1,
+            "fallback VML must not duplicate the Choice image in a table cell"
+        );
+        assert_eq!(images[0].resource_id, "rId4");
     }
 
     #[test]

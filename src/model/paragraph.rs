@@ -384,8 +384,11 @@ impl Paragraph {
     }
 
     /// Check if this paragraph is empty.
+    ///
+    /// A paragraph carrying inline images is never empty, even with no text:
+    /// image-only paragraphs must survive empty-paragraph filtering.
     pub fn is_empty(&self) -> bool {
-        self.runs.is_empty() || self.runs.iter().all(|r| r.is_empty())
+        self.images.is_empty() && (self.runs.is_empty() || self.runs.iter().all(|r| r.is_empty()))
     }
 
     /// Check if this paragraph is a heading.

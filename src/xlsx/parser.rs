@@ -3,8 +3,8 @@
 use crate::container::OoxmlContainer;
 use crate::error::{Error, Result};
 use crate::model::{
-    Block, Cell, CellAlignment, Document, Metadata, Paragraph, Resource, ResourceType, Row,
-    Section, Table, TextRun,
+    Block, Cell, CellAlignment, Document, InlineImage, Metadata, Paragraph, Resource, ResourceType,
+    Row, Section, Table, TextRun,
 };
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -148,9 +148,12 @@ impl XlsxParser {
         // Parse metadata
         doc.metadata = self.parse_metadata()?;
 
+        // Resolve "Place in Cell" rich-value images once per workbook
+        let rich_value_images = self.parse_rich_value_images()?;
+
         // Parse each sheet as a section with a table
         for (idx, sheet) in self.sheets.clone().iter().enumerate() {
-            let section = self.parse_sheet_as_section(idx, sheet)?;
+            let section = self.parse_sheet_as_section(idx, sheet, &rich_value_images)?;
             doc.add_section(section);
         }
 
@@ -193,8 +196,10 @@ impl XlsxParser {
             return Ok(());
         }
 
+        let rich_value_images = self.parse_rich_value_images()?;
+
         for (idx, sheet) in self.sheets.clone().iter().enumerate() {
-            let section_result = self.parse_sheet_as_section(idx, sheet);
+            let section_result = self.parse_sheet_as_section(idx, sheet, &rich_value_images);
 
             match section_result {
                 Ok(section) => {
@@ -241,7 +246,12 @@ impl XlsxParser {
     }
 
     /// Parse a single sheet into a Section.
-    fn parse_sheet_as_section(&self, idx: usize, sheet: &SheetInfo) -> Result<Section> {
+    fn parse_sheet_as_section(
+        &self,
+        idx: usize,
+        sheet: &SheetInfo,
+        rich_value_images: &HashMap<u32, String>,
+    ) -> Result<Section> {
         let mut section = Section::new(idx);
         section.name = Some(sheet.name.clone());
 
@@ -258,7 +268,8 @@ impl XlsxParser {
                 let hyperlink_map = Self::parse_hyperlinks(&xml, &sheet_rels);
                 let comment_map =
                     Self::find_and_parse_comments(&self.container, &sheet_rels, sheet_dir)?;
-                let table = self.parse_sheet(&xml, &hyperlink_map, &comment_map)?;
+                let table =
+                    self.parse_sheet(&xml, &hyperlink_map, &comment_map, rich_value_images)?;
                 section.add_block(Block::Table(table));
 
                 let images = self.parse_sheet_drawing_images(&sheet_path)?;
@@ -362,6 +373,7 @@ impl XlsxParser {
         xml: &str,
         hyperlink_map: &HashMap<String, String>,
         comment_map: &HashMap<String, String>,
+        rich_value_images: &HashMap<u32, String>,
     ) -> Result<Table> {
         // First pass: parse merge cells
         let merge_map = Self::parse_merge_cells(xml);
@@ -380,6 +392,7 @@ impl XlsxParser {
         let mut current_cell_type: Option<String> = None;
         let mut current_cell_ref: Option<String> = None;
         let mut current_cell_style: Option<usize> = None;
+        let mut current_cell_vm: Option<u32> = None;
         let mut current_cell_value = String::new();
         let mut is_first_row = true;
 
@@ -399,12 +412,14 @@ impl XlsxParser {
                         current_cell_type = None;
                         current_cell_ref = None;
                         current_cell_style = None;
+                        current_cell_vm = None;
                         current_cell_value.clear();
                         Self::parse_cell_attributes(
                             e,
                             &mut current_cell_type,
                             &mut current_cell_ref,
                             &mut current_cell_style,
+                            &mut current_cell_vm,
                         );
                     }
                     b"v" if in_cell => {
@@ -421,15 +436,17 @@ impl XlsxParser {
                         current_cell_type = None;
                         current_cell_ref = None;
                         current_cell_style = None;
+                        current_cell_vm = None;
                         current_cell_value.clear();
                         Self::parse_cell_attributes(
                             e,
                             &mut current_cell_type,
                             &mut current_cell_ref,
                             &mut current_cell_style,
+                            &mut current_cell_vm,
                         );
 
-                        let cell = self.build_sheet_cell(
+                        let mut cell = self.build_sheet_cell(
                             &current_cell_value,
                             current_cell_type.as_deref(),
                             current_cell_style,
@@ -441,6 +458,12 @@ impl XlsxParser {
                                 is_header: is_first_row,
                             },
                         )?;
+                        Self::attach_rich_value_image(
+                            &mut cell,
+                            current_cell_vm,
+                            current_cell_type.as_deref(),
+                            rich_value_images,
+                        );
 
                         if let Some(ref mut row) = current_row {
                             Self::push_cell_with_row_local_spacing(
@@ -468,7 +491,7 @@ impl XlsxParser {
                         is_first_row = false;
                     }
                     b"c" => {
-                        let cell = self.build_sheet_cell(
+                        let mut cell = self.build_sheet_cell(
                             &current_cell_value,
                             current_cell_type.as_deref(),
                             current_cell_style,
@@ -480,6 +503,12 @@ impl XlsxParser {
                                 is_header: is_first_row,
                             },
                         )?;
+                        Self::attach_rich_value_image(
+                            &mut cell,
+                            current_cell_vm,
+                            current_cell_type.as_deref(),
+                            rich_value_images,
+                        );
 
                         if let Some(ref mut row) = current_row {
                             Self::push_cell_with_row_local_spacing(
@@ -492,6 +521,7 @@ impl XlsxParser {
 
                         in_cell = false;
                         current_cell_ref = None;
+                        current_cell_vm = None;
                     }
                     b"v" | b"t" => {
                         in_value = false;
@@ -543,6 +573,7 @@ impl XlsxParser {
         current_cell_type: &mut Option<String>,
         current_cell_ref: &mut Option<String>,
         current_cell_style: &mut Option<usize>,
+        current_cell_vm: &mut Option<u32>,
     ) {
         for attr in e.attributes().flatten() {
             match attr.key.as_ref() {
@@ -554,6 +585,9 @@ impl XlsxParser {
                 }
                 b"s" => {
                     *current_cell_style = String::from_utf8_lossy(&attr.value).parse().ok();
+                }
+                b"vm" => {
+                    *current_cell_vm = String::from_utf8_lossy(&attr.value).parse().ok();
                 }
                 _ => {}
             }
@@ -938,6 +972,333 @@ impl XlsxParser {
             .map(|rels| rels.into_type_targets_by_id())
     }
 
+    /// Resolve "Place in Cell" (rich-value) images to a `vm` → media-filename map.
+    ///
+    /// Excel stores in-cell images as error cells (`t="e" vm="N"` with a
+    /// `#VALUE!` placeholder) whose real content lives in a chain of
+    /// workbook-level parts:
+    ///
+    /// 1. `xl/metadata.xml` — `vm` (1-based) → valueMetadata bk → rc[@v] →
+    ///    futureMetadata\[XLRICHVALUE\] bk → `xlrd:rvb[@i]` = rich-value index
+    /// 2. `xl/richData/rdrichvaluestructure.xml` — structure key order; the
+    ///    `_rvRel:LocalImageIdentifier` key position selects the `<v>` slot
+    /// 3. `xl/richData/rdrichvalue.xml` — rich value `<rv s="…">` with `<v>`
+    ///    values; the selected slot is an index into richValueRel
+    /// 4. `xl/richData/richValueRel.xml` + its rels — index → r:id → media path
+    ///
+    /// Any missing link in the chain yields an empty map (graceful
+    /// degradation for foreign producers); malformed XML surfaces as an error.
+    fn parse_rich_value_images(&self) -> Result<HashMap<u32, String>> {
+        let wb_rels = self.read_optional_relationships_for_part("xl/workbook.xml")?;
+        let part_by_type = |suffix: &str| -> Option<String> {
+            wb_rels
+                .values()
+                .find(|(rel_type, _)| rel_type.ends_with(suffix))
+                .map(|(_, target)| Self::resolve_relative_path("xl", target))
+        };
+
+        let (Some(metadata_path), Some(rv_path), Some(structure_path), Some(rel_path)) = (
+            part_by_type("/sheetMetadata"),
+            part_by_type("/rdRichValue"),
+            part_by_type("/rdRichValueStructure"),
+            part_by_type("/richValueRel"),
+        ) else {
+            return Ok(HashMap::new());
+        };
+        let (Some(metadata_xml), Some(rv_xml), Some(structure_xml), Some(rel_xml)) = (
+            self.container.read_xml_optional(&metadata_path)?,
+            self.container.read_xml_optional(&rv_path)?,
+            self.container.read_xml_optional(&structure_path)?,
+            self.container.read_xml_optional(&rel_path)?,
+        ) else {
+            return Ok(HashMap::new());
+        };
+
+        let vm_to_rv = Self::parse_value_metadata(&metadata_xml)?;
+        let image_key_positions = Self::parse_rich_value_structures(&structure_xml)?;
+        let rich_values = Self::parse_rich_values(&rv_xml)?;
+        let rel_ids = Self::parse_rich_value_rel_ids(&rel_xml)?;
+        let rel_targets = self
+            .read_optional_relationships_for_part(&rel_path)?
+            .into_iter()
+            .map(|(id, (_, target))| (id, target))
+            .collect::<HashMap<_, _>>();
+
+        let mut result = HashMap::new();
+        for (vm, rv_index) in vm_to_rv {
+            let Some((structure_index, values)) = rich_values.get(rv_index) else {
+                continue;
+            };
+            let Some(&Some(key_pos)) = image_key_positions.get(*structure_index) else {
+                continue;
+            };
+            let Some(rel_index) = values.get(key_pos).and_then(|v| v.parse::<usize>().ok()) else {
+                continue;
+            };
+            let Some(target) = rel_ids.get(rel_index).and_then(|id| rel_targets.get(id)) else {
+                continue;
+            };
+            let filename = target.rsplit('/').next().unwrap_or(target).to_string();
+            result.insert(vm, filename);
+        }
+
+        Ok(result)
+    }
+
+    /// Parse `xl/metadata.xml` into a `vm` (1-based) → rich-value-index map.
+    fn parse_value_metadata(xml: &str) -> Result<HashMap<u32, usize>> {
+        let mut reader = quick_xml::Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+
+        let mut metadata_type_names: Vec<String> = Vec::new();
+        let mut future_rvb: Vec<usize> = Vec::new(); // futureMetadata bk order → rvb i
+        let mut value_rcs: Vec<(u32, usize)> = Vec::new(); // valueMetadata bk order → (rc t, rc v)
+        let mut in_future_xlrichvalue = false;
+        let mut in_value_metadata = false;
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Start(ref e))
+                | Ok(quick_xml::events::Event::Empty(ref e)) => {
+                    match e.name().local_name().as_ref() {
+                        b"metadataType" => {
+                            for attr in e.attributes().flatten() {
+                                if attr.key.local_name().as_ref() == b"name" {
+                                    metadata_type_names
+                                        .push(String::from_utf8_lossy(&attr.value).to_string());
+                                }
+                            }
+                        }
+                        b"futureMetadata" => {
+                            in_future_xlrichvalue = e.attributes().flatten().any(|attr| {
+                                attr.key.local_name().as_ref() == b"name"
+                                    && attr.value.as_ref() == b"XLRICHVALUE"
+                            });
+                        }
+                        b"rvb" if in_future_xlrichvalue => {
+                            for attr in e.attributes().flatten() {
+                                if attr.key.local_name().as_ref() == b"i" {
+                                    if let Ok(i) =
+                                        String::from_utf8_lossy(&attr.value).parse::<usize>()
+                                    {
+                                        future_rvb.push(i);
+                                    }
+                                }
+                            }
+                        }
+                        b"valueMetadata" => in_value_metadata = true,
+                        b"rc" if in_value_metadata => {
+                            let mut t = None;
+                            let mut v = None;
+                            for attr in e.attributes().flatten() {
+                                match attr.key.local_name().as_ref() {
+                                    b"t" => t = String::from_utf8_lossy(&attr.value).parse().ok(),
+                                    b"v" => v = String::from_utf8_lossy(&attr.value).parse().ok(),
+                                    _ => {}
+                                }
+                            }
+                            if let (Some(t), Some(v)) = (t, v) {
+                                value_rcs.push((t, v));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(quick_xml::events::Event::End(ref e)) => match e.name().local_name().as_ref() {
+                    b"futureMetadata" => in_future_xlrichvalue = false,
+                    b"valueMetadata" => in_value_metadata = false,
+                    _ => {}
+                },
+                Ok(quick_xml::events::Event::Eof) => break,
+                Err(e) => return Err(Error::xml_parse_with_context(e.to_string(), "metadata")),
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        // rc[@t] is a 1-based index into metadataTypes; only XLRICHVALUE
+        // records reference rich values.
+        let xlrichvalue_type = metadata_type_names
+            .iter()
+            .position(|n| n == "XLRICHVALUE")
+            .map(|p| (p + 1) as u32);
+
+        let mut map = HashMap::new();
+        if let Some(rv_type) = xlrichvalue_type {
+            for (idx, (t, v)) in value_rcs.iter().enumerate() {
+                if *t == rv_type {
+                    if let Some(&rv_index) = future_rvb.get(*v) {
+                        map.insert((idx + 1) as u32, rv_index);
+                    }
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    /// Parse `rdrichvaluestructure.xml`: per structure (in order), the
+    /// position of the `_rvRel:LocalImageIdentifier` key, if any.
+    fn parse_rich_value_structures(xml: &str) -> Result<Vec<Option<usize>>> {
+        let mut reader = quick_xml::Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+
+        let mut structures: Vec<Option<usize>> = Vec::new();
+        let mut current_key_index = 0usize;
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Start(ref e))
+                | Ok(quick_xml::events::Event::Empty(ref e)) => {
+                    match e.name().local_name().as_ref() {
+                        b"s" => {
+                            structures.push(None);
+                            current_key_index = 0;
+                        }
+                        b"k" => {
+                            let is_image_key = e.attributes().flatten().any(|attr| {
+                                attr.key.local_name().as_ref() == b"n"
+                                    && attr.value.as_ref() == b"_rvRel:LocalImageIdentifier"
+                            });
+                            if is_image_key {
+                                if let Some(last) = structures.last_mut() {
+                                    *last = Some(current_key_index);
+                                }
+                            }
+                            current_key_index += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                Err(e) => {
+                    return Err(Error::xml_parse_with_context(
+                        e.to_string(),
+                        "rdrichvaluestructure",
+                    ))
+                }
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        Ok(structures)
+    }
+
+    /// Parse `rdrichvalue.xml`: ordered rich values as (structure index, v slots).
+    fn parse_rich_values(xml: &str) -> Result<Vec<(usize, Vec<String>)>> {
+        let mut reader = quick_xml::Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+
+        let mut values: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut in_v = false;
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Start(ref e)) => {
+                    match e.name().local_name().as_ref() {
+                        b"rv" => {
+                            let mut s = 0usize;
+                            for attr in e.attributes().flatten() {
+                                if attr.key.local_name().as_ref() == b"s" {
+                                    s = String::from_utf8_lossy(&attr.value).parse().unwrap_or(0);
+                                }
+                            }
+                            values.push((s, Vec::new()));
+                        }
+                        b"v" => {
+                            in_v = true;
+                            if let Some((_, slots)) = values.last_mut() {
+                                slots.push(String::new());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(quick_xml::events::Event::Text(ref e)) if in_v => {
+                    if let Some(slot) = values.last_mut().and_then(|(_, s)| s.last_mut()) {
+                        slot.push_str(&crate::decode::decode_text_lossy(e));
+                    }
+                }
+                Ok(quick_xml::events::Event::End(ref e))
+                    if e.name().local_name().as_ref() == b"v" =>
+                {
+                    in_v = false;
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                Err(e) => return Err(Error::xml_parse_with_context(e.to_string(), "rdrichvalue")),
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        Ok(values)
+    }
+
+    /// Parse `richValueRel.xml`: ordered relationship IDs.
+    fn parse_rich_value_rel_ids(xml: &str) -> Result<Vec<String>> {
+        let mut reader = quick_xml::Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+
+        let mut ids = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Start(ref e))
+                | Ok(quick_xml::events::Event::Empty(ref e))
+                    if e.name().local_name().as_ref() == b"rel" =>
+                {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.local_name().as_ref() == b"id" {
+                            ids.push(String::from_utf8_lossy(&attr.value).to_string());
+                        }
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                Err(e) => return Err(Error::xml_parse_with_context(e.to_string(), "richValueRel")),
+                _ => {}
+            }
+            buf.clear();
+        }
+        Ok(ids)
+    }
+
+    /// Attach a resolved rich-value image to a finished cell.
+    ///
+    /// The `#VALUE!` placeholder of an error-typed cell is what Excel shows
+    /// without rich-value support; the image is the real content, so the
+    /// placeholder runs are dropped.
+    fn attach_rich_value_image(
+        cell: &mut Cell,
+        vm: Option<u32>,
+        cell_type: Option<&str>,
+        rich_value_images: &HashMap<u32, String>,
+    ) {
+        let Some(filename) = vm.and_then(|v| rich_value_images.get(&v)) else {
+            return;
+        };
+        if cell_type == Some("e") {
+            for para in &mut cell.content {
+                para.runs.clear();
+            }
+        }
+        let image = InlineImage {
+            resource_id: filename.clone(),
+            alt_text: None,
+            width: None,
+            height: None,
+        };
+        match cell.content.first_mut() {
+            Some(para) => para.images.push(image),
+            None => cell.content.push(Paragraph {
+                images: vec![image],
+                ..Default::default()
+            }),
+        }
+    }
+
     /// Resolve a relative path (e.g., "../drawings/drawing1.xml") against a base directory.
     fn resolve_relative_path(base_dir: &str, relative: &str) -> String {
         if relative.starts_with('/') {
@@ -1238,7 +1599,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(table.rows.len(), 1);
@@ -1264,7 +1625,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(table.rows.len(), 0);
@@ -1292,7 +1653,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(
@@ -1318,7 +1679,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(table.rows.len(), 1);
@@ -1348,7 +1709,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(table.rows.len(), 1);
@@ -1386,7 +1747,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(table.rows.len(), 2);
@@ -1424,7 +1785,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(
@@ -1452,7 +1813,7 @@ mod tests {
             </worksheet>"#;
 
         let table = parser
-            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new())
+            .parse_sheet(sheet_xml, &HashMap::new(), &HashMap::new(), &HashMap::new())
             .unwrap();
 
         assert_eq!(table.rows.len(), 2);
@@ -1771,6 +2132,182 @@ mod tests {
                 "row '{label}' split across lines:\n{md}"
             );
         }
+    }
+
+    /// Build an XLSX containing one "Place in Cell" rich-value image in B1.
+    /// Mirrors the part layout Excel writes: cell `t="e" vm="1"` with a
+    /// `#VALUE!` placeholder, resolved through xl/metadata.xml and the
+    /// xl/richData/* chain to xl/media/image1.png.
+    fn create_rich_value_image_xlsx() -> Vec<u8> {
+        create_test_zip(&[
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata" Target="metadata.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2017/06/relationships/rdRichValue" Target="richData/rdrichvalue.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.microsoft.com/office/2017/06/relationships/rdRichValueStructure" Target="richData/rdrichvaluestructure.xml"/>
+  <Relationship Id="rId5" Type="http://schemas.microsoft.com/office/2022/10/relationships/richValueRel" Target="richData/richValueRel.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>label</t></is></c>
+      <c r="B1" t="e" vm="1"><v>#VALUE!</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#,
+            ),
+            (
+                "xl/metadata.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:xlrd="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata">
+  <metadataTypes count="1">
+    <metadataType name="XLRICHVALUE" minSupportedVersion="120000" copy="1" pasteAll="1" pasteValues="1" merge="1" splitFirst="1" rowColShift="1" clearFormats="1" clearComments="1" assign="1" coerce="1"/>
+  </metadataTypes>
+  <futureMetadata name="XLRICHVALUE" count="1">
+    <bk><extLst><ext uri="{3e2802c4-a4d2-4d8b-9148-e3be6c30e623}"><xlrd:rvb i="0"/></ext></extLst></bk>
+  </futureMetadata>
+  <valueMetadata count="1">
+    <bk><rc t="1" v="0"/></bk>
+  </valueMetadata>
+</metadata>"#,
+            ),
+            (
+                "xl/richData/rdrichvaluestructure.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<rvStructures xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="1">
+  <s t="_localImage">
+    <k n="_rvRel:LocalImageIdentifier" t="i"/>
+    <k n="CalcOrigin" t="i"/>
+  </s>
+</rvStructures>"#,
+            ),
+            (
+                "xl/richData/rdrichvalue.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<rvData xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="1">
+  <rv s="0"><v>0</v><v>5</v></rv>
+</rvData>"#,
+            ),
+            (
+                "xl/richData/richValueRel.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<richValueRels xmlns="http://schemas.microsoft.com/office/spreadsheetml/2022/richvaluerel"
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <rel r:id="rId1"/>
+</richValueRels>"#,
+            ),
+            (
+                "xl/richData/_rels/richValueRel.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"#,
+            ),
+            ("xl/media/image1.png", "fake-png-bytes"),
+        ])
+    }
+
+    #[test]
+    fn test_rich_value_in_cell_image_extracted() {
+        let data = create_rich_value_image_xlsx();
+        let mut parser = XlsxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let table = doc.sections[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table missing");
+        let cell = &table.rows[0].cells[1];
+
+        assert!(
+            !cell.plain_text().contains("#VALUE!"),
+            "placeholder error text must be replaced by the image: {:?}",
+            cell.plain_text()
+        );
+        let images: Vec<_> = cell.content.iter().flat_map(|p| &p.images).collect();
+        assert_eq!(images.len(), 1, "in-cell image not extracted");
+        assert_eq!(images[0].resource_id, "image1.png");
+
+        let md =
+            crate::render::to_markdown(&doc, &crate::render::RenderOptions::default()).unwrap();
+        assert!(
+            md.contains("![") && md.contains("image1.png"),
+            "markdown must reference the in-cell image:\n{md}"
+        );
+        assert!(
+            doc.resources.contains_key("image1.png"),
+            "media file must be extracted as a resource"
+        );
+    }
+
+    #[test]
+    fn test_rich_value_vm_without_rich_data_parts_keeps_placeholder() {
+        // A vm attribute with no resolvable richData chain (foreign producer,
+        // stripped file) must degrade gracefully: keep the cell text, no panic.
+        let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#;
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="e" vm="1"><v>#VALUE!</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let data = create_minimal_xlsx_with_parts(Some(workbook_rels), None, None, sheet_xml);
+
+        let mut parser = XlsxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+
+        let table = doc.sections[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table missing");
+        assert!(table.rows[0].cells[0].plain_text().contains("#VALUE!"));
     }
 
     #[test]
