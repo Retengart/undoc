@@ -84,6 +84,32 @@ fn lenient_slow_path(input: &str) -> String {
     out
 }
 
+/// Normalize line endings to LF.
+///
+/// Covers two layers quick-xml leaves untouched: XML §2.11 end-of-line
+/// normalization for literal CR/CRLF from non-conforming producers, and CRs
+/// that re-enter via `&#13;` character references — how Excel stores in-cell
+/// line breaks. undoc extracts text, where a CR carries no meaning distinct
+/// from LF but breaks Markdown pipe tables, so both collapse to LF.
+fn normalize_line_endings(input: Cow<'_, str>) -> Cow<'_, str> {
+    if !input.contains('\r') {
+        return input;
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Decode a `BytesText` event into an owned `String` using lossy UTF-8
 /// substitution and the lenient entity path.
 ///
@@ -92,7 +118,7 @@ fn lenient_slow_path(input: &str) -> String {
 /// as an error.
 pub(crate) fn decode_text_lossy(text: &BytesText<'_>) -> String {
     let raw = String::from_utf8_lossy(text.as_ref());
-    lenient_unescape(raw.as_ref()).into_owned()
+    normalize_line_endings(lenient_unescape(raw.as_ref())).into_owned()
 }
 
 /// Decode a `BytesText` event into an owned `String`, requiring valid UTF-8.
@@ -103,7 +129,7 @@ pub(crate) fn decode_text_lossy(text: &BytesText<'_>) -> String {
 pub(crate) fn decode_text_strict(text: &BytesText<'_>, location: &str) -> Result<String> {
     let raw = std::str::from_utf8(text.as_ref())
         .map_err(|err| Error::xml_parse_with_context(err.to_string(), location))?;
-    Ok(lenient_unescape(raw).into_owned())
+    Ok(normalize_line_endings(lenient_unescape(raw)).into_owned())
 }
 
 #[cfg(test)]
@@ -199,5 +225,29 @@ mod tests {
     #[test]
     fn slow_path_empty_entity_reference() {
         assert_eq!(lenient_unescape("a &; b &bogus;"), "a &; b &bogus;");
+    }
+
+    #[test]
+    fn lossy_normalizes_literal_carriage_returns() {
+        // quick-xml does not perform XML §2.11 end-of-line normalization,
+        // so literal CR/CRLF from non-conforming producers must be
+        // normalized here. Bare CR breaks Markdown pipe tables (issue #7).
+        let text = BytesText::from_escaped("one\rtwo\r\nthree");
+        assert_eq!(decode_text_lossy(&text), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn lossy_normalizes_cr_character_references() {
+        // Excel stores in-cell CR/CRLF as &#13; character references,
+        // which survive XML EOL normalization by design. undoc extracts
+        // text, where CR carries no meaning — normalize to LF.
+        let text = BytesText::from_escaped("one&#13;two&#13;&#10;three&#xD;four");
+        assert_eq!(decode_text_lossy(&text), "one\ntwo\nthree\nfour");
+    }
+
+    #[test]
+    fn strict_normalizes_carriage_returns() {
+        let text = BytesText::from_escaped("a\r\nb&#xD;c");
+        assert_eq!(decode_text_strict(&text, "test").unwrap(), "a\nb\nc");
     }
 }

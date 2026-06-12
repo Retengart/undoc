@@ -892,8 +892,10 @@ fn render_cell_content(
         text
     };
 
-    // Only replace newlines - pipes are already escaped by escape_markdown in render_run
-    text.replace('\n', " ")
+    // Only replace line breaks - pipes are already escaped by escape_markdown
+    // in render_run. Bare CR is treated as a line break too: a leaked CR
+    // splits the pipe-table row in most Markdown renderers.
+    text.replace("\r\n", "\n").replace(['\n', '\r'], " ")
 }
 
 /// Effective alignment for a cell.
@@ -1427,6 +1429,33 @@ mod tests {
 
         let md = render_table(&table, &RenderOptions::default(), &empty_resource_map());
         assert!(md.contains("|"), "default should keep table form: {md:?}");
+    }
+
+    #[test]
+    fn test_table_cell_carriage_returns_do_not_split_rows() {
+        // Defense-in-depth: even if model text carries a bare CR (e.g. a
+        // Document built programmatically), a pipe-table row must stay on
+        // one physical line (issue #7).
+        let mut table = Table::new();
+        table.add_row(Row {
+            cells: vec![
+                Cell::with_text("line one\rline two"),
+                Cell::with_text("a\r\nb"),
+            ],
+            is_header: false,
+            height: None,
+        });
+
+        let md = render_table(&table, &RenderOptions::default(), &empty_resource_map());
+        assert!(!md.contains('\r'), "bare CR leaked into table: {md:?}");
+        let row_line = md
+            .lines()
+            .find(|l| l.contains("line one"))
+            .expect("row missing");
+        assert!(
+            row_line.contains("line two") && row_line.ends_with('|'),
+            "row split across lines: {md:?}"
+        );
     }
 
     #[test]

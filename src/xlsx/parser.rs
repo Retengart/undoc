@@ -1728,6 +1728,52 @@ mod tests {
     }
 
     #[test]
+    fn test_cell_carriage_returns_do_not_break_markdown_table() {
+        // Excel/openpyxl store in-cell CR and CRLF as &#13; character
+        // references. A bare CR leaking into a Markdown pipe table splits
+        // the row across physical lines (issue #7).
+        let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#;
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>h1</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>h2</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t>cr</t></is></c>
+      <c r="B2" t="inlineStr"><is><t>line one&#13;line two</t></is></c>
+    </row>
+    <row r="3">
+      <c r="A3" t="inlineStr"><is><t>crlf</t></is></c>
+      <c r="B3" t="inlineStr"><is><t>line one&#13;&#10;line two</t></is></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let data = create_minimal_xlsx_with_parts(Some(workbook_rels), None, None, sheet_xml);
+
+        let mut parser = XlsxParser::from_bytes(data).unwrap();
+        let doc = parser.parse().unwrap();
+        let md =
+            crate::render::to_markdown(&doc, &crate::render::RenderOptions::default()).unwrap();
+
+        assert!(!md.contains('\r'), "bare CR leaked into markdown: {md:?}");
+        for label in ["cr", "crlf"] {
+            let row_line = md
+                .lines()
+                .find(|l| l.starts_with(&format!("| {label} ")))
+                .unwrap_or_else(|| panic!("row '{label}' missing in:\n{md}"));
+            assert!(
+                row_line.contains("line one") && row_line.contains("line two"),
+                "row '{label}' split across lines:\n{md}"
+            );
+        }
+    }
+
+    #[test]
     fn test_xlsx_requires_workbook_relationships() {
         let data = create_minimal_xlsx(None, None);
         let err = XlsxParser::from_bytes(data)

@@ -133,6 +133,14 @@ fn is_no_space_before(c: char) -> bool {
     )
 }
 
+/// Flatten cell text onto one line: any line break (LF, CRLF, or a bare CR
+/// that would split the table row) becomes a single space.
+fn cell_single_line_text(cell: &crate::model::Cell) -> String {
+    cell.plain_text()
+        .replace("\r\n", "\n")
+        .replace(['\n', '\r'], " ")
+}
+
 /// Render a table to plain text (ASCII table).
 /// Uses unicode-width to correctly align CJK characters (which take 2 columns in terminals).
 fn render_table_text(table: &Table) -> String {
@@ -166,7 +174,7 @@ fn render_table_text(table: &Table) -> String {
         for (i, cell) in row.cells.iter().enumerate() {
             let col_idx = i + offset;
             if col_idx < col_count {
-                let text = cell.plain_text().replace('\n', " ");
+                let text = cell_single_line_text(cell);
                 // Use display width for correct CJK alignment
                 widths[col_idx] = widths[col_idx].max(text.width());
             }
@@ -208,7 +216,7 @@ fn render_table_text(table: &Table) -> String {
         for (i, cell) in row.cells.iter().enumerate() {
             let col_idx = if row_idx == 0 { i + header_missing } else { i };
             if col_idx < col_count {
-                let text = cell.plain_text().replace('\n', " ");
+                let text = cell_single_line_text(cell);
                 output.push_str(&format!(" {} |", pad_to_width(&text, widths[col_idx])));
             }
         }
@@ -264,6 +272,29 @@ mod tests {
         let para = Paragraph::with_text("Hello, World!");
         let text = render_paragraph_text(&para);
         assert_eq!(text, "Hello, World!");
+    }
+
+    #[test]
+    fn test_table_cell_carriage_returns_do_not_split_rows() {
+        // Defense-in-depth mirror of the markdown renderer test: a bare CR
+        // in cell text must not break an ASCII table row (issue #7).
+        let mut table = Table::new();
+        table.add_row(Row {
+            cells: vec![Cell::with_text("line one\rline two")],
+            is_header: false,
+            height: None,
+        });
+
+        let text = render_table_text(&table);
+        assert!(!text.contains('\r'), "bare CR leaked into table: {text:?}");
+        let row_line = text
+            .lines()
+            .find(|l| l.contains("line one"))
+            .expect("row missing");
+        assert!(
+            row_line.contains("line two"),
+            "row split across lines: {text:?}"
+        );
     }
 
     #[test]
