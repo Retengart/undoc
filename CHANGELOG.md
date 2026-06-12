@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-12
+
+### Fixed
+- **BUG (#7)** — Bare carriage returns (`\r`, stored by Excel/openpyxl as `&#13;` character references) no longer leak into Markdown output, where they split pipe-table rows across physical lines. CR and CRLF are normalized to LF at the shared XML decode layer (covers DOCX, XLSX, and PPTX, including literal CR/CRLF per XML §2.11), and the Markdown/text table renderers additionally treat any remaining CR as a line break when flattening cell text.
+
 ## [0.5.0] - 2026-06-01
 
 ### Added
