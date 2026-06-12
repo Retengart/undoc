@@ -185,6 +185,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # registry-url is required: it writes the .npmrc that maps
+      # NODE_AUTH_TOKEN to registry auth. Without it `npm publish`
+      # fails with ENEEDAUTH even when the token is set.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
