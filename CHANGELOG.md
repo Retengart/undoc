@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-12
+
+### Added
+- **FEAT (#8)** — DOCX legacy VML images (`w:pict`/`w:object` > `v:imagedata`), typical of .doc → .docx conversions, are now extracted as inline images. VML inside `mc:Fallback` is still skipped to avoid duplicating the paired DrawingML `mc:Choice` image.
+- **FEAT (#8)** — XLSX "Place in Cell" rich-value images (cells with `t="e" vm="N"` and a `#VALUE!` placeholder) are now resolved through the `xl/metadata.xml` → `xl/richData/*` chain and rendered as inline images in their table cell, replacing the placeholder. Files with a missing or foreign rich-data chain degrade gracefully.
+
+### Fixed
+- Image-only paragraphs are no longer considered empty, so they survive empty-paragraph filtering (previously dropped VML images inside DOCX table cells).
+- CI: npm publish of `@iyulab/undoc` failed with `ENEEDAUTH` — the workflow now configures registry auth via `actions/setup-node`.
+
 ## [0.5.1] - 2026-06-12
 
 ### Fixed
